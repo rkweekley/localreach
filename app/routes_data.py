@@ -23,15 +23,23 @@ class WorkspaceIn(BaseModel):
 
 @router.post("/workspaces")
 def create_workspace(w: WorkspaceIn) -> dict:
+    """Create a workspace, or return the existing one with the same slug.
+
+    Idempotent on purpose: re-running a deploy probe or an e2e check must not
+    raise `UNIQUE constraint failed` and turn a healthy instance into a 500.
+    """
     conn = connect()
     try:
+        existing = rows(conn.execute("SELECT * FROM workspaces WHERE slug = ?", (w.slug,)))
+        if existing:
+            return {**existing[0], "existed": True}
         wid = new_id()
         conn.execute(
             "INSERT INTO workspaces (id,name,slug,physical_address,daily_send_cap,created_at) VALUES (?,?,?,?,?,?)",
             (wid, w.name, w.slug, w.physical_address, w.daily_send_cap, utcnow()),
         )
         conn.commit()
-        return {"id": wid, **w.model_dump()}
+        return {"id": wid, **w.model_dump(), "existed": False}
     finally:
         conn.close()
 

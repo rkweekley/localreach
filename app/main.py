@@ -76,6 +76,19 @@ async def unhandled(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": "internal error", "request_id": rid}, status_code=500)
 
 
+@app.get("/")
+def index() -> dict:
+    """Service identity for humans and for uptime monitors. No secrets."""
+    return {
+        "service": "LocalReach",
+        "version": app.version,
+        "status": "ok",
+        "health": "/health",
+        "readiness": "/ready",
+        "docs": None if settings.production else "/docs",
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     """Liveness. Deliberately reveals nothing about configuration."""

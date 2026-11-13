@@ -227,3 +227,22 @@ def test_agent_builds_a_draft_campaign():
     assert out["action"] == "campaign_drafted"
     assert out["status"] == "draft"          # never auto-sends
     assert out["mailable"] >= 1
+
+
+def test_root_is_a_service_identity_not_a_404():
+    r = TestClient(app).get("/")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "LocalReach"
+    assert body["status"] == "ok"
+
+
+def test_creating_the_same_workspace_twice_is_idempotent():
+    """A re-run deploy probe must not 500 on a UNIQUE constraint."""
+    payload = {"name": "Idem Co", "slug": "idem-co", "physical_address": "9 Main St"}
+    first = c.post("/api/workspaces", json=payload)
+    second = c.post("/api/workspaces", json=payload)
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.json()["existed"] is False
+    assert second.json()["existed"] is True
+    assert first.json()["id"] == second.json()["id"]
