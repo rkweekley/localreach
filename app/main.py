@@ -18,7 +18,7 @@ import logging
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import config, logging_setup, routes_ai, routes_campaigns, routes_data, routes_webhooks
+from . import config, logging_setup, routes_ai, routes_campaigns, routes_data, routes_ui, routes_webhooks
 from .db import healthcheck, init_db
 from .security import RateLimiter, require_token
 
@@ -46,7 +46,9 @@ _auth = [Depends(require_token)]
 app.include_router(routes_data.router, dependencies=_auth)
 app.include_router(routes_campaigns.router, dependencies=_auth)
 app.include_router(routes_ai.router, dependencies=_auth)
-# Public surface: signed-token opt-out, then HMAC-verified webhooks.
+app.include_router(routes_ui.router, dependencies=_auth)
+# Public surface: the dashboard shell, signed-token opt-out, then HMAC-verified webhooks.
+app.include_router(routes_ui.public)
 app.include_router(routes_webhooks.router)
 
 
@@ -76,9 +78,12 @@ async def unhandled(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": "internal error", "request_id": rid}, status_code=500)
 
 
-@app.get("/")
+@app.get("/identity")
 def index() -> dict:
-    """Service identity for humans and for uptime monitors. No secrets."""
+    """Service identity for uptime monitors and deploy checks. No secrets.
+
+    `/` serves the operator dashboard, so the machine-readable card lives here.
+    """
     return {
         "service": "LocalReach",
         "version": app.version,

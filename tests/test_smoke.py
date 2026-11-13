@@ -229,12 +229,23 @@ def test_agent_builds_a_draft_campaign():
     assert out["mailable"] >= 1
 
 
-def test_root_is_a_service_identity_not_a_404():
-    r = TestClient(app).get("/")
+def test_root_serves_the_dashboard_and_identity_keeps_the_json_card():
+    """`/` is the operator dashboard; monitors assert against `/identity`.
+
+    The dashboard is inert until a bearer token is supplied, so serving it
+    unauthenticated leaks nothing. The JSON service card moved to `/identity`
+    so uptime checks keep a stable machine-readable target.
+    """
+    client = TestClient(app)
+    r = client.get("/")
     assert r.status_code == 200
-    body = r.json()
-    assert body["service"] == "LocalReach"
-    assert body["status"] == "ok"
+    assert r.headers["content-type"].startswith("text/html")
+    assert "LocalReach" in r.text
+    assert "lr.token" in r.text  # the shell reads the token from localStorage
+
+    ident = client.get("/identity").json()
+    assert ident["service"] == "LocalReach"
+    assert ident["status"] == "ok"
 
 
 def test_worker_heartbeat_and_db_dir_are_self_creating(tmp_path):

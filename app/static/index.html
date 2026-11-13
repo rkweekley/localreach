@@ -1,0 +1,830 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>LocalReach</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#111621; --panel-2:#161d2b; --line:#222c3d;
+    --text:#e6ecf5; --muted:#8b9ab2; --accent:#4f9cf9; --accent-2:#2f7fe0;
+    --ok:#33c48b; --warn:#f0b429; --bad:#ef5f5f; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  button,input,select,textarea{font:inherit;color:inherit}
+  a{color:var(--accent)}
+  [hidden]{display:none !important}
+
+  /* ---------- gate ---------- */
+  .gate{position:fixed;inset:0;display:grid;place-items:center;padding:24px;
+    background:radial-gradient(900px 500px at 50% -10%,#152036 0,var(--bg) 60%)}
+  .gate-card{width:100%;max-width:380px;background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:26px;box-shadow:0 24px 60px rgba(0,0,0,.45)}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:650;letter-spacing:.2px}
+  .mark{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--accent),#7c5cff);
+    display:grid;place-items:center;font-size:13px;font-weight:800;color:#fff}
+  .gate h1{font-size:18px;margin:18px 0 6px}
+  .gate p{color:var(--muted);margin:0 0 18px;font-size:13px}
+  .field{display:grid;gap:6px;margin-bottom:12px}
+  .field label{font-size:12px;color:var(--muted);letter-spacing:.02em}
+  input,select,textarea{background:#0d121b;border:1px solid var(--line);border-radius:8px;
+    padding:9px 11px;width:100%;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+  textarea{min-height:92px;resize:vertical;font-family:var(--mono);font-size:12.5px}
+  .btn{background:var(--accent);border:1px solid transparent;color:#fff;border-radius:8px;
+    padding:9px 14px;cursor:pointer;font-weight:600;white-space:nowrap}
+  .btn:hover{background:var(--accent-2)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.ghost{background:transparent;border-color:var(--line);color:var(--text);font-weight:500}
+  .btn.ghost:hover{border-color:#33415a;background:var(--panel-2)}
+  .btn.sm{padding:5px 10px;font-size:12.5px;border-radius:7px}
+  .err{color:var(--bad);font-size:12.5px;min-height:18px}
+
+  /* ---------- shell ---------- */
+  .shell{display:grid;grid-template-columns:212px 1fr;height:100vh}
+  .rail{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;
+    padding:16px 12px;gap:4px}
+  .rail .brand{padding:4px 8px 18px}
+  .nav{display:flex;flex-direction:column;gap:2px}
+  .nav button{display:flex;align-items:center;gap:10px;background:none;border:0;text-align:left;
+    padding:9px 10px;border-radius:8px;color:var(--muted);cursor:pointer;font-weight:500}
+  .nav button:hover{background:var(--panel-2);color:var(--text)}
+  .nav button.on{background:#1b2740;color:#fff}
+  .nav .ico{width:16px;text-align:center;opacity:.9}
+  .rail-foot{margin-top:auto;padding:10px;border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;display:grid;gap:6px}
+  .main{display:flex;flex-direction:column;min-width:0;min-height:0}
+  .topbar{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--line);
+    background:rgba(17,22,33,.75);backdrop-filter:blur(6px)}
+  .topbar select{width:auto;min-width:170px}
+  .spacer{flex:1}
+  .content{padding:20px;overflow:auto;flex:1}
+  .h{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 0 16px}
+  .h h2{margin:0;font-size:19px;letter-spacing:-.2px}
+  .h p{margin:4px 0 0;color:var(--muted);font-size:13px}
+
+  /* ---------- primitives ---------- */
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;
+    font-size:11.5px;font-weight:600;border:1px solid var(--line);background:var(--panel-2);color:var(--muted)}
+  .pill.ok{color:#8fe6c0;border-color:#1d5541;background:#0f2a22}
+  .pill.warn{color:#ffd98a;border-color:#5a451a;background:#2a2110}
+  .pill.bad{color:#ffb3b3;border-color:#5a2424;background:#2a1414}
+  .pill.info{color:#a9cdfb;border-color:#24425f;background:#101d2c}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .grid{display:grid;gap:12px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+  .card .k{color:var(--muted);font-size:12px;letter-spacing:.02em}
+  .card .v{font-size:26px;font-weight:650;margin-top:6px;letter-spacing:-.5px}
+  .card .s{color:var(--muted);font-size:12px;margin-top:2px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
+  .panel-h{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:12px 16px;border-bottom:1px solid var(--line)}
+  .panel-h h3{margin:0;font-size:13.5px;font-weight:600}
+  .panel-b{padding:16px}
+  table{width:100%;border-collapse:collapse}
+  th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+    text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);font-weight:600;white-space:nowrap}
+  td{padding:10px 12px;border-bottom:1px solid #1a2231;vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  tbody tr:hover{background:#131a26}
+  .muted{color:var(--muted)}
+  .mono{font-family:var(--mono);font-size:12px}
+  .strong{font-weight:600}
+  .empty{padding:34px 18px;text-align:center;color:var(--muted)}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+  .fit{font-family:var(--mono);font-weight:700}
+  .fit.hi{color:var(--ok)} .fit.mid{color:var(--warn)} .fit.lo{color:var(--muted)}
+  .check{width:15px;height:15px;accent-color:var(--accent)}
+  .action-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 16px;
+    border-bottom:1px solid var(--line);background:#0f1420}
+
+  /* ---------- modal / toast ---------- */
+  .modal{position:fixed;inset:0;background:rgba(4,7,12,.65);display:grid;place-items:center;padding:24px;z-index:40}
+  .modal-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    width:100%;max-width:620px;max-height:86vh;overflow:auto;box-shadow:0 30px 80px rgba(0,0,0,.55)}
+  .modal-h{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;
+    border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
+  .modal-h h3{margin:0;font-size:15px}
+  .modal-b{padding:18px}
+  .modal-f{display:flex;justify-content:flex-end;gap:8px;padding:14px 18px;border-top:1px solid var(--line)}
+  .x{background:none;border:0;color:var(--muted);font-size:20px;cursor:pointer;line-height:1}
+  .toasts{position:fixed;right:16px;bottom:16px;display:grid;gap:8px;z-index:60;max-width:360px}
+  .toast{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--accent);
+    padding:10px 12px;border-radius:8px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  .toast.ok{border-left-color:var(--ok)} .toast.bad{border-left-color:var(--bad)}
+  pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12.5px;
+    background:#0d121b;border:1px solid var(--line);border-radius:8px;padding:12px;max-height:46vh;overflow:auto}
+  .steps{display:grid;gap:10px}
+  .step{border:1px solid var(--line);border-radius:9px;padding:10px;background:#0f1420}
+  .step-h{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .step-h .n{width:22px;height:22px;border-radius:6px;background:#1b2740;display:grid;place-items:center;
+    font-size:11px;font-weight:700;color:#a9cdfb}
+  @media (max-width:820px){
+    .shell{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+    .rail{flex-direction:row;align-items:center;overflow-x:auto;padding:8px}
+    .rail .brand{padding:0 10px 0 4px}
+    .nav{flex-direction:row}
+    .rail-foot{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div id="gate" class="gate">
+  <form class="gate-card" id="gateForm">
+    <div class="brand"><span class="mark">LR</span> LocalReach</div>
+    <h1>Connect to your workspace</h1>
+    <p>Paste the API token from this deployment's <span class="mono">.env</span> (<span class="mono">API_TOKEN</span>). It is stored only in this browser.</p>
+    <div class="field">
+      <label for="token">API token</label>
+      <input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="paste token">
+    </div>
+    <div class="err" id="gateErr"></div>
+    <button class="btn" style="width:100%;margin-top:6px">Unlock</button>
+  </form>
+</div>
+
+<div id="app" class="shell" hidden>
+  <aside class="rail">
+    <div class="brand"><span class="mark">LR</span> LocalReach</div>
+    <nav class="nav" id="nav">
+      <button data-view="overview" class="on"><span class="ico">◧</span> Overview</button>
+      <button data-view="leads"><span class="ico">◎</span> Leads</button>
+      <button data-view="sequences"><span class="ico">⇉</span> Sequences</button>
+      <button data-view="outbox"><span class="ico">✉</span> Outbox</button>
+      <button data-view="voice"><span class="ico">✎</span> Voice</button>
+    </nav>
+    <div class="rail-foot">
+      <div id="footSender">—</div>
+      <div id="footMode">—</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <select id="wsSelect" title="Workspace"></select>
+      <span id="dryPill" class="pill">—</span>
+      <div class="spacer"></div>
+      <button class="btn ghost sm" id="btnNewWs">New workspace</button>
+      <button class="btn ghost sm" id="btnRefresh">Refresh</button>
+      <button class="btn ghost sm" id="btnLock">Lock</button>
+    </header>
+    <div class="content" id="view"></div>
+  </main>
+</div>
+
+<div id="modal" class="modal" hidden><div class="modal-card" id="modalCard"></div></div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const nfmt = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString();
+const dt = (s) => { if (!s) return "—"; const d = new Date(s); return isNaN(d) ? esc(s) : d.toLocaleString([], {month:"short", day:"numeric", hour:"2-digit", minute:"2-digit"}); };
+
+const store = {
+  get token(){ return localStorage.getItem("lr.token") || ""; },
+  set token(v){ v ? localStorage.setItem("lr.token", v) : localStorage.removeItem("lr.token"); },
+  get ws(){ return localStorage.getItem("lr.ws") || ""; },
+  set ws(v){ v ? localStorage.setItem("lr.ws", v) : localStorage.removeItem("lr.ws"); },
+  get profile(){ return localStorage.getItem("lr.profile." + state.ws) || ""; },
+  set profile(v){ v ? localStorage.setItem("lr.profile." + state.ws, v) : localStorage.removeItem("lr.profile." + state.ws); },
+};
+
+const state = {
+  view: "overview",
+  workspaces: [],
+  ws: "",
+  leads: [],
+  selected: new Set(),
+  seqs: [],
+  seqId: null,
+  dryRun: true,
+  sender: "",
+  loading: false,
+};
+
+/* ---------------- transport ---------------- */
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + store.token, ...(opts.headers || {}) },
+  });
+  const raw = await res.text();
+  let data = null;
+  if (raw) { try { data = JSON.parse(raw); } catch { data = raw; } }
+  if (res.status === 401) { lock("Token rejected — paste a current API token."); throw new Error("unauthorized"); }
+  if (!res.ok) {
+    const detail = (data && data.detail) ? (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail)) : res.statusText;
+    throw new Error(detail);
+  }
+  return data;
+}
+const q = (o) => Object.entries(o).filter(([, v]) => v !== "" && v !== null && v !== undefined && v !== false)
+  .map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&");
+
+/* ---------------- ui helpers ---------------- */
+function toast(msg, kind = "") {
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+function openModal(title, bodyHtml, footerHtml = "") {
+  $("#modalCard").innerHTML =
+    '<div class="modal-h"><h3>' + esc(title) + '</h3><button class="x" data-close>&times;</button></div>' +
+    '<div class="modal-b">' + bodyHtml + '</div>' +
+    (footerHtml ? '<div class="modal-f">' + footerHtml + '</div>' : "");
+  $("#modal").hidden = false;
+}
+function closeModal() { $("#modal").hidden = true; $("#modalCard").innerHTML = ""; }
+$("#modal").addEventListener("click", (e) => { if (e.target.id === "modal" || e.target.hasAttribute("data-close")) closeModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+
+function lock(msg) {
+  store.token = "";
+  $("#app").hidden = true;
+  $("#gate").hidden = false;
+  $("#gateErr").textContent = msg || "";
+  $("#token").value = "";
+  $("#token").focus();
+}
+
+/* ---------------- boot ---------------- */
+$("#gateForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const val = $("#token").value.trim();
+  if (!val) return;
+  $("#gateErr").textContent = "";
+  store.token = val;
+  try { await boot(); } catch (err) { lock(err.message === "unauthorized" ? "That token was rejected." : err.message); }
+});
+
+$("#nav").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-view]");
+  if (!b) return;
+  state.view = b.dataset.view;
+  [...$("#nav").children].forEach((x) => x.classList.toggle("on", x === b));
+  render();
+});
+$("#btnRefresh").addEventListener("click", () => boot(true));
+$("#btnLock").addEventListener("click", () => lock(""));
+$("#wsSelect").addEventListener("change", (e) => {
+  state.ws = e.target.value; store.ws = state.ws;
+  state.selected.clear(); state.seqId = null;
+  render();
+});
+
+async function boot(silent = false) {
+  if (!store.token) { lock(""); return; }
+  const health = await fetch("/health").then((r) => r.json()).catch(() => ({}));
+  state.dryRun = health.dry_run !== false;
+  const ov = await api("/api/overview?workspace_id=" + encodeURIComponent(state.ws || "x")).catch(() => null);
+  state.workspaces = await api("/api/workspaces");
+  if (!state.workspaces.length) {
+    $("#gate").hidden = true; $("#app").hidden = false;
+    $("#wsSelect").innerHTML = '<option>No workspace</option>';
+    $("#view").innerHTML = '<div class="panel"><div class="empty"><h3>No workspace yet</h3>' +
+      '<p class="muted">A workspace holds your sending identity, daily cap and compliance footer.</p>' +
+      '<button class="btn" id="emptyNewWs" style="margin-top:12px">Create workspace</button></div></div>';
+    $("#emptyNewWs").onclick = newWorkspaceModal;
+    return;
+  }
+  if (!state.workspaces.some((w) => w.id === state.ws)) state.ws = state.workspaces[0].id;
+  store.ws = state.ws;
+  $("#wsSelect").innerHTML = state.workspaces.map((w) =>
+    '<option value="' + esc(w.id) + '"' + (w.id === state.ws ? " selected" : "") + '>' + esc(w.name) + "</option>").join("");
+  $("#gate").hidden = true;
+  $("#app").hidden = false;
+
+  const ws = await api("/api/overview?" + q({workspace_id: state.ws})).catch(() => null);
+  if (ws) {
+    state.dryRun = ws.dry_run;
+    state.sender = ws.sender || "";
+    $("#dryPill").className = "pill " + (ws.dry_run ? "warn" : "ok");
+    $("#dryPill").innerHTML = '<span class="dot"></span>' + (ws.dry_run ? "Dry run — nothing sends" : "Live sending");
+    $("#footSender").textContent = "From: " + (ws.sender || "—");
+    $("#footMode").textContent = ws.dry_run ? "DRY_RUN=1" : "DRY_RUN=0";
+  }
+  if (!silent) toast("Connected", "ok");
+  await render();
+}
+
+/* ---------------- router ---------------- */
+async function render() {
+  if (!state.ws) return;
+  const v = $("#view");
+  v.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    if (state.view === "overview") await viewOverview(v);
+    else if (state.view === "leads") await viewLeads(v);
+    else if (state.view === "sequences") await viewSequences(v);
+    else if (state.view === "outbox") await viewOutbox(v);
+    else if (state.view === "voice") await viewVoice(v);
+  } catch (err) {
+    v.innerHTML = '<div class="panel"><div class="empty">Could not load this view: ' + esc(err.message) + "</div></div>";
+  }
+}
+
+/* ---------------- overview ---------------- */
+async function viewOverview(v) {
+  const d = await api("/api/overview?" + q({workspace_id: state.ws}));
+  const c = d.counts;
+  v.innerHTML =
+    '<div class="h"><div><h2>' + esc(d.workspace.name) + '</h2>' +
+      '<p>Daily cap ' + nfmt(d.workspace.daily_send_cap) + ' · footer address ' + esc(d.workspace.physical_address) + '</p></div>' +
+      '<div class="row"><span class="pill ' + (d.dry_run ? "warn" : "ok") + '">' + (d.dry_run ? "dry run" : "live") + '</span></div></div>' +
+    '<div class="grid cards">' +
+      card("Leads", nfmt(c.businesses), c.contacts + " contacts · " + c.contacts_verified + " verified") +
+      card("Sequences", nfmt(c.sequences), c.sequences_active + " active") +
+      card("Messages", nfmt(c.sent), c.replies + " replies") +
+      card("Open tasks", nfmt(c.open_tasks), "calls / research queued") +
+      card("Suppressed", nfmt(c.suppressions), "never contacted again") +
+    '</div>' +
+    '<div class="grid" style="grid-template-columns:1.6fr 1fr;margin-top:12px">' +
+      '<div class="panel"><div class="panel-h"><h3>Recent activity</h3>' +
+        '<button class="btn ghost sm" data-go="outbox">Open outbox</button></div>' +
+        (d.recent.length ? '<table><thead><tr><th>To</th><th>Subject</th><th>Status</th><th>When</th></tr></thead><tbody>' +
+          d.recent.map((m) => '<tr><td><div class="strong">' + esc(m.business_name || "—") + '</div><div class="mono muted">' + esc(m.to_email || "") + '</div></td>' +
+            '<td>' + esc(m.subject || "—") + '</td><td>' + statusPill(m.provider_status, m.direction) + '</td><td class="muted">' + dt(m.created_at) + "</td></tr>").join("") +
+          "</tbody></table>" : '<div class="empty">Nothing generated yet. Import leads, build a sequence, then run a tick.</div>') +
+      '</div>' +
+      '<div class="panel"><div class="panel-h"><h3>Next steps</h3></div><div class="panel-b" style="display:grid;gap:12px">' +
+        stepLine("1", "Import leads", "CSV paste or one at a time", "leads") +
+        stepLine("2", "Score them", "fit = category demand × reachability", "leads") +
+        stepLine("3", "Build a sequence", "3 steps is the default cadence", "sequences") +
+        stepLine("4", "Enroll + tick", "in dry run this writes to outbox only", "sequences") +
+      '</div></div>' +
+    '</div>';
+  v.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => { state.view = b.dataset.go;
+    [...$("#nav").children].forEach((x) => x.classList.toggle("on", x.dataset.view === state.view)); render(); });
+  const ob = v.querySelector('[data-go="outbox"]'); if (ob) ob.onclick = () => { state.view = "outbox";
+    [...$("#nav").children].forEach((x) => x.classList.toggle("on", x.dataset.view === "outbox")); render(); };
+}
+const card = (k, val, sub) => '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' + val + '</div><div class="s">' + esc(sub) + "</div></div>";
+const stepLine = (n, t, s, go) => '<div class="row" style="justify-content:flex-start;align-items:flex-start">' +
+  '<span class="pill info">' + n + '</span><div><div class="strong">' + esc(t) + '</div><div class="muted" style="font-size:12.5px">' + esc(s) + "</div></div></div>";
+function statusPill(status, direction) {
+  const s = String(status || "unknown");
+  const cls = s === "dry_run" ? "warn" : (s === "accepted" || s === "delivered" ? "ok" : (s === "failed" || s === "complained" ? "bad" : "info"));
+  return '<span class="pill ' + cls + '">' + esc(direction === "inbound" ? "reply" : s) + "</span>";
+}
+
+function skipNote(skipped) {
+  // /enroll returns skipped as [{business_id, reason}], not a count.
+  if (!Array.isArray(skipped) || !skipped.length) return "";
+  const reasons = [...new Set(skipped.map((s) => s.reason).filter(Boolean))];
+  return ", skipped " + skipped.length + (reasons.length ? " (" + reasons.join(", ") + ")" : "");
+}
+
+/* ---------------- leads ---------------- */
+async function viewLeads(v) {
+  v.innerHTML =
+    '<div class="h"><div><h2>Leads</h2><p>Local businesses with provenance. Scored, deduped, suppression-aware.</p></div>' +
+      '<button class="btn" id="btnImport">Import CSV</button></div>' +
+    '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
+      '<div class="form-grid">' +
+        '<div class="field"><label>Category</label><input id="fCat" placeholder="e.g. roofing"></div>' +
+        '<div class="field"><label>City</label><input id="fCity" placeholder="e.g. Columbus"></div>' +
+        '<div class="field"><label>State</label><input id="fState" placeholder="OH" maxlength="2"></div>' +
+        '<div class="field"><label>Min fit</label><input id="fFit" type="number" min="0" max="100" value="0"></div>' +
+        '<div class="field"><label>Min reviews</label><input id="fRev" type="number" min="0" value="0"></div>' +
+      '</div>' +
+      '<div class="row"><button class="btn sm" id="btnSearch">Search</button>' +
+        '<label class="row muted" style="gap:6px;font-size:12.5px"><input type="checkbox" class="check" id="fVerified" style="width:15px"> verified email only</label>' +
+        '<span class="muted" id="leadCount"></span></div>' +
+    "</div></div>" +
+    '<div class="panel"><div class="action-bar">' +
+      '<span class="muted" id="selCount">0 selected</span>' +
+      '<div class="spacer"></div>' +
+      '<button class="btn ghost sm" id="btnScore" disabled>Score selected</button>' +
+      '<button class="btn ghost sm" id="btnList" disabled>Save as list</button>' +
+      '<button class="btn sm" id="btnEnroll" disabled>Enroll in sequence</button>' +
+    '</div><div id="leadTable"><div class="empty">Search to see leads.</div></div></div>';
+
+  $("#btnSearch").onclick = () => loadLeads();
+  $("#btnImport").onclick = importModal;
+  $("#btnScore").onclick = scoreSelected;
+  $("#btnList").onclick = saveList;
+  $("#btnEnroll").onclick = enrollSelected;
+  $("#leadTable").addEventListener("change", (e) => {
+    const cb = e.target.closest("input[data-bid]");
+    if (!cb) return;
+    cb.checked ? state.selected.add(cb.dataset.bid) : state.selected.delete(cb.dataset.bid);
+    syncSel();
+  });
+  $("#leadTable").addEventListener("click", (e) => {
+    const row = e.target.closest("tr[data-row]");
+    if (row && !e.target.closest("input")) leadModal(row.dataset.row);
+  });
+  await loadLeads();
+}
+
+function syncSel() {
+  const n = state.selected.size;
+  const el = $("#selCount"); if (el) el.textContent = n + " selected";
+  ["btnScore", "btnList", "btnEnroll"].forEach((id) => { const b = $("#" + id); if (b) b.disabled = n === 0; });
+}
+
+async function loadLeads() {
+  const params = {
+    workspace_id: state.ws,
+    category: $("#fCat").value.trim(),
+    city: $("#fCity").value.trim(),
+    state: $("#fState").value.trim().toUpperCase(),
+    min_fit: Number($("#fFit").value || 0),
+    min_reviews: Number($("#fRev").value || 0),
+    verified_email_only: $("#fVerified").checked,
+    limit: 200,
+  };
+  try {
+    const d = await api("/api/search?" + q(params));
+    state.leads = d.results || [];
+    $("#leadCount").textContent = state.leads.length + " result" + (state.leads.length === 1 ? "" : "s");
+    renderLeads();
+  } catch (err) { toast(err.message, "bad"); }
+}
+
+function renderLeads() {
+  const host = $("#leadTable");
+  if (!state.leads.length) { host.innerHTML = '<div class="empty">No matches. Widen the filters or import leads.</div>'; return; }
+  host.innerHTML = '<table><thead><tr><th style="width:28px"></th><th>Business</th><th>Category</th><th>Reviews</th>' +
+    '<th>Contact</th><th>Fit</th></tr></thead><tbody>' +
+    state.leads.map((b) => {
+      const fit = b.fit_score;
+      const cls = fit == null ? "lo" : fit >= 70 ? "hi" : fit >= 45 ? "mid" : "lo";
+      const email = b.email
+        ? '<div class="mono">' + esc(b.email) + "</div>" + (b.suppressed ? ' <span class="pill bad">suppressed</span>' : "")
+        : '<span class="muted">no email</span>';
+      return '<tr data-row="' + esc(b.id) + '"><td><input type="checkbox" class="check" data-bid="' + esc(b.id) + '"' +
+        (state.selected.has(b.id) ? " checked" : "") + "></td>" +
+        '<td><div class="strong">' + esc(b.name) + '</div><div class="muted" style="font-size:12px">' +
+          esc([b.city, b.state].filter(Boolean).join(", ") || "—") + "</div></td>" +
+        '<td class="muted">' + esc(b.category || "—") + "</td>" +
+        '<td><span class="mono">' + nfmt(b.review_count) + '</span> <span class="muted">· ' + (b.rating ? esc(b.rating) + "★" : "—") + "</span></td>" +
+        '<td>' + email + (b.email_status ? ' <span class="pill ' + (b.email_status === "verified" ? "ok" : "info") + '">' + esc(b.email_status) + "</span>" : "") + "</td>" +
+        '<td><span class="fit ' + cls + '">' + (fit == null ? "—" : fit) + "</span></td></tr>";
+    }).join("") + "</tbody></table>";
+}
+
+async function scoreSelected() {
+  const ids = [...state.selected];
+  let ok = 0;
+  try {
+    for (const id of ids) { await api("/api/businesses/" + encodeURIComponent(id) + "/score", {method: "POST", body: JSON.stringify({icp_categories: []})}); ok++; }
+    toast("Scored " + ok + " lead" + (ok === 1 ? "" : "s"), "ok");
+    await loadLeads(); syncSel();
+  } catch (err) { toast("Scored " + ok + ", then: " + err.message, "bad"); }
+}
+
+function saveList() {
+  openModal("Save selection as list",
+    '<div class="field"><label>List name</label><input id="listName" placeholder="e.g. Columbus roofers — tier A"></div>' +
+    '<p class="muted" style="font-size:12.5px">' + state.selected.size + " leads will be added. Lists are static snapshots unless built from a saved filter.</p>",
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doList">Save list</button>');
+  $("#doList").onclick = async () => {
+    const name = $("#listName").value.trim();
+    if (!name) return toast("Name is required", "bad");
+    try {
+      const r = await api("/api/lists", {method: "POST", body: JSON.stringify({workspace_id: state.ws, name, business_ids: [...state.selected]})});
+      closeModal(); toast("Saved list with " + (r.members ?? state.selected.size) + " members", "ok");
+    } catch (err) { toast(err.message, "bad"); }
+  };
+}
+
+async function enrollSelected() {
+  let seqs = [];
+  try { seqs = await api("/api/sequences?" + q({workspace_id: state.ws})); } catch (err) { return toast(err.message, "bad"); }
+  if (!seqs.length) return toast("Create a sequence first", "bad");
+  openModal("Enroll " + state.selected.size + " lead(s)",
+    '<div class="field"><label>Sequence</label><select id="enrollSeq">' +
+      seqs.map((s) => '<option value="' + esc(s.id) + '">' + esc(s.name) + " · " + esc(s.status) + " · " + s.steps + " steps</option>").join("") +
+    "</select></div><p class=\"muted\" style=\"font-size:12.5px\">Blocked contacts (suppressed, no email, role address) are skipped automatically.</p>",
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doEnroll">Enroll</button>');
+  $("#doEnroll").onclick = async () => {
+    const sid = $("#enrollSeq").value;
+    try {
+      const r = await api("/api/sequences/" + encodeURIComponent(sid) + "/enroll",
+        {method: "POST", body: JSON.stringify({business_ids: [...state.selected], skip_blocked: true})});
+      closeModal();
+      toast("Enrolled " + (r.enrolled ?? 0) + skipNote(r.skipped), "ok");
+    } catch (err) { toast(err.message, "bad"); }
+  };
+}
+
+function importModal() {
+  openModal("Import leads from CSV",
+    '<p class="muted" style="font-size:12.5px;margin-top:0">Header row required. Recognised columns: ' +
+    '<span class="mono">name, category, city, state, phone, website, contact_email, contact_name, title, rating, reviews</span></p>' +
+    '<div class="field"><textarea id="csv" placeholder="name,category,city,state,phone,website,contact_email\nKessler Roofing,roofing,Columbus,OH,6145550100,kesslerroofing.com,owner@kesslerroofing.com" style="min-height:180px"></textarea></div>' +
+    '<div class="err" id="csvErr"></div>',
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doImport">Import</button>');
+  $("#doImport").onclick = async () => {
+    const rows = parseCsv($("#csv").value);
+    if (!rows.length) { $("#csvErr").textContent = "Nothing parsed — include a header row."; return; }
+    try {
+      const r = await api("/api/businesses/import", {method: "POST", body: JSON.stringify(rows)});
+      closeModal();
+      toast("Imported " + (r.created ?? 0) + ", updated " + (r.updated ?? 0), "ok");
+      await loadLeads();
+    } catch (err) { $("#csvErr").textContent = err.message; }
+  };
+}
+
+function parseCsv(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const split = (line) => {
+    const out = []; let cur = "", q = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (q) { if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch; }
+      else if (ch === '"') q = true;
+      else if (ch === ",") { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur); return out.map((v) => v.trim());
+  };
+  const head = split(lines[0]).map((h) => h.toLowerCase().replace(/[^a-z0-9]+/g, "_"));
+  const alias = {business:"name", business_name:"name", company:"name", category_group:"category", zip:"postal_code",
+    review_count:"reviews", contact_title:"title", email:"contact_email", contact:"contact_name", owner:"contact_name"};
+  return lines.slice(1).map((line) => {
+    const cells = split(line); const o = {};
+    head.forEach((h, i) => { const k = alias[h] || h; if (cells[i] !== undefined && cells[i] !== "") o[k] = cells[i]; });
+    if (o.rating) o.rating = Number(o.rating) || null;
+    if (o.reviews) o.review_count = Number(o.reviews) || 0;
+    delete o.reviews;
+    o.source = "csv";
+    return o;
+  }).filter((o) => o.name);
+}
+
+async function leadModal(id) {
+  const b = state.leads.find((x) => x.id === id);
+  if (!b) return;
+  let factors = b.factors;
+  try { factors = factors ? JSON.parse(factors) : null; } catch {}
+  openModal(b.name,
+    '<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">' +
+      info("Fit score", b.fit_score ?? "—") + info("Demand", b.demand_score ?? "—") +
+      info("Reach", b.reach_score ?? "—") + info("Category", b.category || "—") +
+      info("Phone", b.phone || "—") + info("Website", b.website || "—") +
+      info("Address", [b.address1, b.city, b.state, b.postal_code].filter(Boolean).join(", ") || "—") +
+      info("Source", b.source || "—") + info("Contact", b.contact_name || "—") + info("Email status", b.email_status || "—") +
+    "</div>" + (factors ? '<div style="margin-top:12px"><div class="k muted" style="font-size:12px;margin-bottom:6px">Score factors</div><pre>' + esc(JSON.stringify(factors, null, 2)) + "</pre></div>" : ""),
+    '<button class="btn ghost sm" data-close>Close</button>');
+}
+const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="k">' + esc(k) + '</div><div style="margin-top:4px">' + esc(v) + "</div></div>";
+
+/* ---------------- sequences ---------------- */
+async function viewSequences(v) {
+  v.innerHTML =
+    '<div class="h"><div><h2>Sequences</h2><p>Multi-step email cadence. Dry run writes to the outbox without sending.</p></div>' +
+      '<div class="row"><button class="btn ghost" id="btnTick">Run tick now</button><button class="btn" id="btnNewSeq">New sequence</button></div></div>' +
+    '<div id="seqWrap"><div class="empty">Loading…</div></div>';
+  $("#btnNewSeq").onclick = newSequenceModal;
+  $("#btnTick").onclick = runTick;
+  await loadSequences();
+}
+
+async function loadSequences() {
+  const wrap = $("#seqWrap");
+  try {
+    state.seqs = await api("/api/sequences?" + q({workspace_id: state.ws}));
+  } catch (err) { wrap.innerHTML = '<div class="panel"><div class="empty">' + esc(err.message) + "</div></div>"; return; }
+  if (!state.seqs.length) {
+    wrap.innerHTML = '<div class="panel"><div class="empty">No sequences yet. Start with a 3-step cadence: intro, value, close.</div></div>';
+    return;
+  }
+  wrap.innerHTML = '<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">' +
+    state.seqs.map((s) => '<div class="panel"><div class="panel-h"><h3>' + esc(s.name) + "</h3>" + statusPill(s.status) + "</div>" +
+      '<div class="panel-b"><div class="row" style="gap:16px">' +
+        stat(s.steps, "steps") + stat(s.active, "active") + stat(s.enrolled, "enrolled") + stat(s.sent, "sent") +
+      '</div><div class="row" style="margin-top:14px">' +
+        '<button class="btn ghost sm" data-open="' + esc(s.id) + '">Open</button>' +
+        (s.status !== "active" ? '<button class="btn sm" data-act="' + esc(s.id) + '">Activate</button>' : "") +
+      "</div></div></div>").join("") + "</div>";
+
+  wrap.querySelectorAll("[data-open]").forEach((b) => b.onclick = () => openSequence(b.dataset.open));
+  wrap.querySelectorAll("[data-act]").forEach((b) => b.onclick = async () => {
+    try { await api("/api/sequences/" + encodeURIComponent(b.dataset.act) + "/activate", {method: "POST"}); toast("Sequence activated", "ok"); await loadSequences(); }
+    catch (err) { toast(err.message, "bad"); }
+  });
+}
+const stat = (n, label) => '<div><div class="strong" style="font-size:18px">' + nfmt(n) + '</div><div class="muted" style="font-size:11.5px">' + esc(label) + "</div></div>";
+
+async function openSequence(id) {
+  let d;
+  try { d = await api("/api/sequences/" + encodeURIComponent(id) + "/detail"); } catch (err) { return toast(err.message, "bad"); }
+  openModal(d.name,
+    '<div class="row" style="margin-bottom:12px">' + statusPill(d.status) +
+      '<span class="pill info">' + esc(d.send_window) + "</span>" +
+      '<span class="pill ' + (d.stop_on_reply ? "ok" : "warn") + '">stop on reply: ' + (d.stop_on_reply ? "on" : "off") + "</span></div>" +
+    '<div class="steps">' + d.steps.map((s) => '<div class="step"><div class="step-h"><span class="n">' + s.step_order + "</span>" +
+      '<span class="strong">' + esc(s.subject_template || "(no subject)") + "</span>" +
+      '<span class="pill">' + esc(s.channel) + (s.delay_days ? " · +" + s.delay_days + "d" : "") + "</span></div>" +
+      "<pre>" + esc(s.body_template || "") + "</pre></div>").join("") + "</div>" +
+    '<div class="row" style="margin-top:12px"><span class="muted">' +
+      Object.entries(d.enrollment_status || {}).map(([k, v]) => esc(k) + ": " + v).join(" · ") || "no enrollments" + "</span></div>",
+    '<button class="btn ghost sm" data-close>Close</button>' +
+    '<button class="btn sm" data-close id="seqEnroll">Enroll selection (' + state.selected.size + ")</button>");
+  const b = $("#seqEnroll");
+  if (b) b.onclick = async () => {
+    if (!state.selected.size) return toast("Select leads first, on the Leads tab", "bad");
+    try {
+      const r = await api("/api/sequences/" + encodeURIComponent(id) + "/enroll", {method: "POST", body: JSON.stringify({business_ids: [...state.selected], skip_blocked: true})});
+      toast("Enrolled " + (r.enrolled ?? 0) + skipNote(r.skipped), "ok");
+      await loadSequences();
+    } catch (err) { toast(err.message, "bad"); }
+  };
+}
+
+function newSequenceModal() {
+  const step = (n, subject, body, delay) => '<div class="step"><div class="step-h"><span class="n">' + n + "</span>" +
+    '<span class="strong">Step ' + n + "</span>" + (delay ? '<span class="pill">+' + delay + "d</span>" : "") + "</div>" +
+    '<div class="field"><label>Subject</label><input class="s-sub" value="' + esc(subject) + '"></div>' +
+    '<div class="field"><label>Body</label><textarea class="s-body">' + esc(body) + "</textarea></div></div>";
+  openModal("New sequence",
+    '<div class="field"><label>Name</label><input id="seqName" placeholder="Columbus roofers — Q1"></div>' +
+    '<div class="form-grid"><div class="field"><label>Send window</label><select id="seqWindow">' +
+      '<option value="weekdays_9_16">weekdays 9–16 local</option><option value="weekdays_8_18">weekdays 8–18 local</option>' +
+      '<option value="any">any time</option></select></div>' +
+      '<div class="field"><label>Stop on reply</label><select id="seqStop"><option value="1">yes</option><option value="0">no</option></select></div></div>' +
+    '<div class="steps" id="seqSteps" style="margin-top:6px">' +
+      step(1, "Quick question about {{business_name}}", "Hi {{first_name}},\n\nSaw {{business_name}} is doing well in {{city}} — {{observed_detail}}\n\nWe help local businesses turn their site into a booking channel. Worth a 10-minute look?\n\n{{sender_name}}", "") +
+      step(2, "{{business_name}} site — one idea", "Hi {{first_name}},\n\nFollowing up with one concrete idea for {{business_name}}: {{ai_snippet}}\n\nWant me to send the two-page version?\n\n{{sender_name}}", 3) +
+      step(3, "Closing the loop", "Hi {{first_name}},\n\nI'll stop here so I'm not cluttering your inbox. If a better site becomes a priority, reply and I'll pick it back up.\n\n{{sender_name}}", 4) +
+    "</div>" +
+    '<p class="muted" style="font-size:12px">Variables: {{business_name}} {{first_name}} {{city}} {{category}} {{observed_detail}} {{ai_snippet}} {{sender_name}}. Unsubscribe footer and physical address are appended automatically.</p>' +
+    '<div class="err" id="seqErr"></div>',
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doSeq">Create sequence</button>');
+  $("#doSeq").onclick = async () => {
+    const name = $("#seqName").value.trim();
+    if (!name) { $("#seqErr").textContent = "Name is required."; return; }
+    const steps = [...document.querySelectorAll("#seqSteps .step")].map((el, i) => ({
+      step_order: i + 1, channel: "email", delay_days: i === 0 ? 0 : [3, 4][i - 1] ?? 4,
+      subject_template: $(".s-sub", el).value, body_template: $(".s-body", el).value,
+    }));
+    try {
+      await api("/api/sequences", {method: "POST", body: JSON.stringify({
+        workspace_id: state.ws, name, steps, send_window: $("#seqWindow").value, stop_on_reply: $("#seqStop").value === "1"})});
+      closeModal(); toast("Sequence created", "ok"); await loadSequences();
+    } catch (err) { $("#seqErr").textContent = err.message; }
+  };
+}
+
+async function runTick() {
+  try {
+    const r = await api("/api/worker/tick?" + q({workspace_id: state.ws, limit: 25}), {method: "POST"});
+    const sent = (r.results || []).filter((x) => x.status === "sent").length;
+    toast("Tick processed " + r.processed + " · " + sent + (state.dryRun ? " queued (dry run)" : " sent"), "ok");
+    if ((r.results || []).length) {
+      openModal("Tick result",
+        '<div class="steps">' + r.results.map((x) => '<div class="step"><div class="row"><span class="pill ' +
+          (x.status === "sent" ? "ok" : "bad") + '">' + esc(state.dryRun && x.status === "sent" ? "queued" : x.status) + "</span><span class=\"mono\">" + esc(x.to || x.enrollment) + "</span></div>" +
+          (x.subject ? '<div class="muted" style="font-size:12.5px;margin-top:4px">' + esc(x.subject) + "</div>" : "") +
+          (x.detail ? '<div class="muted mono" style="font-size:12px">' + esc(x.detail) + "</div>" : "") + "</div>").join("") + "</div>",
+        '<button class="btn ghost sm" data-close>Close</button>');
+    }
+    await loadSequences();
+  } catch (err) { toast(err.message, "bad"); }
+}
+
+/* ---------------- outbox ---------------- */
+async function viewOutbox(v) {
+  v.innerHTML =
+    '<div class="h"><div><h2>Outbox</h2><p>Everything the engine has produced. In dry run this is a preview of real sends.</p></div>' +
+      '<div class="row"><select id="obDir" style="width:auto"><option value="">all</option><option value="outbound">outbound</option><option value="inbound">inbound</option></select>' +
+      '<button class="btn ghost sm" id="obRefresh">Refresh</button></div></div>' +
+    '<div class="panel"><div id="obTable"><div class="empty">Loading…</div></div></div>';
+  $("#obDir").onchange = loadOutbox;
+  $("#obRefresh").onclick = loadOutbox;
+  await loadOutbox();
+}
+
+async function loadOutbox() {
+  const host = $("#obTable");
+  try {
+    const d = await api("/api/messages?" + q({workspace_id: state.ws, limit: 100, direction: $("#obDir").value}));
+    if (!d.results.length) { host.innerHTML = '<div class="empty">Nothing here yet. Enroll leads and run a tick.</div>'; return; }
+    host.innerHTML = '<table><thead><tr><th>To</th><th>Subject</th><th>Step</th><th>Status</th><th>Created</th></tr></thead><tbody>' +
+      d.results.map((m) => '<tr data-mid="' + esc(m.id) + '" style="cursor:pointer">' +
+        '<td><div class="strong">' + esc(m.business_name || m.contact_name || "—") + '</div><div class="mono muted">' + esc(m.to_email || "") + "</div></td>" +
+        '<td>' + esc(m.subject || "—") + "</td>" +
+        '<td class="mono muted">' + (m.step_order ?? "—") + "</td>" +
+        "<td>" + statusPill(m.provider_status, m.direction) + "</td>" +
+        '<td class="muted">' + dt(m.created_at) + "</td></tr>").join("") +
+      "</tbody></table>" + '<div class="panel-b muted" style="font-size:12px">Showing ' + d.count + " of " + d.total + " messages.</div>";
+    host.querySelectorAll("tr[data-mid]").forEach((tr) => tr.onclick = () => messageModal(tr.dataset.mid));
+  } catch (err) { host.innerHTML = '<div class="empty">' + esc(err.message) + "</div>"; }
+}
+
+async function messageModal(id) {
+  try {
+    const m = await api("/api/messages/" + encodeURIComponent(id));
+    openModal(m.subject || "(no subject)",
+      '<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">' +
+        info("To", m.to_email || "—") + info("From", m.from_email || "—") +
+        info("Status", m.provider_status || "—") + info("Created", dt(m.created_at)) + "</div>" +
+      "<pre>" + esc(m.body || "(no body)") + "</pre>",
+      '<button class="btn ghost sm" data-close>Close</button>');
+  } catch (err) { toast(err.message, "bad"); }
+}
+
+/* ---------------- voice ---------------- */
+async function viewVoice(v) {
+  const pid = store.profile;
+  let profile = null;
+  if (pid) { try { profile = await api("/api/ai-profiles/" + encodeURIComponent(pid)); } catch { store.profile = ""; } }
+  v.innerHTML =
+    '<div class="h"><div><h2>Voice</h2><p>The AI profile behind {{ai_snippet}}. Readiness grows as you feed it real material.</p></div></div>' +
+    (profile ? profileCard(profile) : '<div class="panel"><div class="panel-h"><h3>Create a profile</h3></div><div class="panel-b">' +
+      '<div class="field"><label>Name</label><input id="vName" value="Cyberal — IT &amp; web"></div>' +
+      '<div class="field"><label>Offer</label><textarea id="vOffer" style="min-height:64px">Flat-rate IT support and websites for small businesses in Ohio. Free proof of concept, then a yearly site fee.</textarea></div>' +
+      '<div class="field"><label>Ideal customer</label><textarea id="vIcp" style="min-height:64px">Owner-operated local businesses, 5–50 staff, outdated site, no dedicated IT.</textarea></div>' +
+      '<div class="field"><label>Tone</label><input id="vTone" value="direct, peer-to-peer, no hype"></div>' +
+      '<div class="field"><label>Proof points (one per line)</label><textarea id="vProof" style="min-height:64px">Rebuilt ALA Ohio\'s WordPress site in a week\n$75/hr flat, no retainers</textarea></div>' +
+      '<div class="row"><button class="btn" id="vCreate">Create profile</button>' +
+      '<button class="btn ghost" id="vAttach">Attach existing id</button></div></div></div>');
+  if ($("#vCreate")) $("#vCreate").onclick = createProfile;
+  if ($("#vAttach")) $("#vAttach").onclick = () => {
+    openModal("Attach profile", '<div class="field"><label>Profile id</label><input id="pidIn" placeholder="32-char id"></div>',
+      '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="pidGo">Attach</button>');
+    $("#pidGo").onclick = () => { store.profile = $("#pidIn").value.trim(); closeModal(); render(); };
+  };
+  if (profile) wireProfile(profile);
+}
+
+function profileCard(p) {
+  return '<div class="panel"><div class="panel-h"><h3>' + esc(p.name) + "</h3>" +
+      '<span class="pill ' + (p.readiness >= 60 ? "ok" : "warn") + '">' + p.readiness + "% ready</span></div>" +
+    '<div class="panel-b"><div class="field"><label>Readiness</label>' +
+      '<div style="height:8px;background:#0d121b;border-radius:99px;overflow:hidden"><div style="width:' + Math.min(100, p.readiness) + '%;height:100%;background:linear-gradient(90deg,#4f9cf9,#7c5cff)"></div></div></div>' +
+      '<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">' +
+        info("Offer", p.offer || "—") + info("ICP", p.icp || "—") + info("Tone", p.tone || "—") +
+        info("Corpus", (p.corpus_chars || 0) + " chars") + "</div>" +
+      '<div class="field" style="margin-top:12px"><label>Add material (your site copy, case studies, past emails)</label>' +
+        '<textarea id="vDoc" placeholder="Paste text. More real material = better snippets." style="min-height:110px"></textarea></div>' +
+      '<div class="row"><button class="btn sm" id="vDocAdd">Add to profile</button>' +
+        '<button class="btn ghost sm" id="vForget">Detach</button></div>' +
+      '<div class="err" id="vErr"></div></div></div>';
+}
+
+function wireProfile(p) {
+  $("#vDocAdd").onclick = async () => {
+    const content = $("#vDoc").value.trim();
+    if (!content) return;
+    try {
+      const r = await api("/api/ai-profiles/" + encodeURIComponent(p.id) + "/docs",
+        {method: "POST", body: JSON.stringify({kind: "paste", label: "dashboard paste", content})});
+      toast("Profile updated — " + (r.readiness ?? "?") + "% ready", "ok");
+      render();
+    } catch (err) { $("#vErr").textContent = err.message; }
+  };
+  $("#vForget").onclick = () => { store.profile = ""; render(); };
+}
+
+async function createProfile() {
+  const proof = $("#vProof").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  try {
+    const p = await api("/api/ai-profiles", {method: "POST", body: JSON.stringify({
+      workspace_id: state.ws, name: $("#vName").value.trim(), offer: $("#vOffer").value.trim(),
+      icp: $("#vIcp").value.trim(), tone: $("#vTone").value.trim(), proof_points: proof})});
+    store.profile = p.id;
+    toast("Profile created", "ok"); render();
+  } catch (err) { toast(err.message, "bad"); }
+}
+
+/* ---------------- workspace ---------------- */
+async function newWorkspaceModal() {
+  openModal("New workspace",
+    '<div class="field"><label>Name</label><input id="wsName" placeholder="Cyberal Solutions"></div>' +
+    '<div class="field"><label>Slug</label><input id="wsSlug" placeholder="cyberal"></div>' +
+    '<div class="field"><label>Physical address (required in every footer)</label><input id="wsAddr" placeholder="123 Main St, Lowell, OH 45744"></div>' +
+    '<div class="field"><label>Daily send cap</label><input id="wsCap" type="number" value="40" min="1" max="500"></div>' +
+    '<div class="err" id="wsErr"></div>',
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="wsGo">Create</button>');
+  $("#wsGo").onclick = async () => {
+    try {
+      const w = await api("/api/workspaces", {method: "POST", body: JSON.stringify({
+        name: $("#wsName").value.trim(), slug: $("#wsSlug").value.trim(),
+        physical_address: $("#wsAddr").value.trim(), daily_send_cap: Number($("#wsCap").value || 40)})});
+      state.ws = w.id; store.ws = w.id; closeModal(); toast("Workspace created", "ok"); await boot(true);
+    } catch (err) { $("#wsErr").textContent = err.message; }
+  };
+}
+$("#btnNewWs").addEventListener("click", newWorkspaceModal);
+
+/* ---------------- start ---------------- */
+if (store.token) { boot().catch((e) => lock(e.message === "unauthorized" ? "Token rejected." : e.message)); }
+else { lock(""); }
+</script>
+</body>
+</html>
