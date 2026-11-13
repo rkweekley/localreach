@@ -257,7 +257,7 @@ CREATE TABLE IF NOT EXISTS research_leads (
   id            TEXT PRIMARY KEY,
   queue_id      TEXT REFERENCES research_queue(id),
   workspace_id  TEXT NOT NULL REFERENCES workspaces(id),
-  client_business_id TEXT REFERENCES businesses(id),  -- the researched business
+  client_business_id TEXT REFERENCES businesses(id),  -- the example business whose type defines the list
   business_id   TEXT REFERENCES businesses(id),       -- the prospect, once created
   name          TEXT NOT NULL,
   domain        TEXT,

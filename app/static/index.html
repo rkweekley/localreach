@@ -588,14 +588,14 @@ const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="
 /* ---------------- research ---------------- */
 async function viewResearch(v) {
   v.innerHTML =
-    '<div class="h"><div><h2>Research</h2><p>Paste a domain. This instance reads the site, learns what the business actually sells, finds matching local leads, then writes the email.</p></div>' +
+    '<div class="h"><div><h2>Research</h2><p>Paste a domain that is an example of the business type you sell to. The agent learns what that type of business is, then finds other companies of the same type in the same market and writes the email.</p></div>' +
       '<div class="row" id="rsStatus"><span class="pill info">checking model</span></div></div>' +
     '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
       '<div class="row" style="align-items:flex-end;gap:8px">' +
-        '<div class="field" style="flex:1;min-width:240px"><label>Prospect domain</label>' +
+        '<div class="field" style="flex:1;min-width:240px"><label>Example domain of the type you sell to</label>' +
           '<input id="rsUrl" placeholder="buckeyeridgeroofing.com" autocomplete="off" spellcheck="false"></div>' +
         '<button class="btn" id="rsGo">Research site</button>' +
-        '<button class="btn ghost" id="rsAgent" title="Queues the domain for the Hermes agent, which reads the site with its own tools">Research with the agent</button>' +
+        '<button class="btn ghost" id="rsAgent" title="Queues the example domain for the Hermes agent, which reads it to fix the business type, then hunts other companies of that type with its own tools">Find more like it</button>' +
         '<button class="btn ghost" id="rsBatch">Research all with sites</button>' +
       '</div>' +
       '<p class="muted" style="font-size:12.5px;margin:10px 0 0">One page per request, ten second timeout, no crawling. Private and LAN addresses are refused. Research never sends anything. The agent path queues the domain and picks it up within a minute.</p>' +
@@ -733,10 +733,10 @@ function rsAgentLeadsHtml(p) {
   const leads = Array.isArray(p.leads) ? p.leads : null;
   if (!leads) return '';
   const head = '<div style="margin-top:16px"><div class="row" style="justify-content:space-between">' +
-    '<div class="muted" style="font-size:12px">Companies that should be buying from them</div>' +
+    '<div class="muted" style="font-size:12px">Other companies of this type worth calling</div>' +
     '<span class="pill ' + (leads.length ? 'ok' : 'warn') + '">' + leads.length + ' found</span></div>';
   if (!leads.length) {
-    return head + '<div class="muted" style="margin-top:6px">The agent read the site but sourced no buying signal this pass. ' +
+    return head + '<div class="muted" style="margin-top:6px">The agent read the site but sourced no lead this pass. ' +
       'Run it again, or open the business and add what you already know.</div></div>';
   }
   const rows = leads.map((l) => {
