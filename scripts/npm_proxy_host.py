@@ -59,8 +59,6 @@ payload = {
     "meta": {"letsencrypt_agree": True, "dns_challenge": False},
     "allow_websocket_upgrade": False,
     "http2_support": True,
-    "forward_scheme_hint": "http",
-    "locations": [],
 }
 
 if existing:
