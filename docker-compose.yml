@@ -53,6 +53,5 @@ volumes:
   localreach-data:
 
 networks:
-  npm:
+  mac:
     external: true
-    name: nginx-proxy-manager_default
