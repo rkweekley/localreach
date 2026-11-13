@@ -12,6 +12,7 @@ boundary, no build step.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -468,6 +469,132 @@ def research_status() -> dict:
     return {"llm": ai.llm_health(), "researched": done, "businesses": total}
 
 
+SIGNAL_KINDS = {
+    "hiring", "permit", "expansion", "review", "rfp", "license", "news", "social", "other",
+}
+
+
+def _lead_domain(raw: str) -> str:
+    """Accept a bare domain or a full URL; store the bare host."""
+    d = (raw or "").strip().lower()
+    d = re.sub(r"^https?://", "", d)
+    d = d.split("/")[0].split("?")[0].strip()
+    return d[4:] if d.startswith("www.") else d
+
+
+def _store_research_leads(
+    conn,
+    workspace_id: str,
+    queue_id: str | None,
+    client_bid: str | None,
+    profile: dict,
+) -> dict:
+    """Save the companies the agent found *for* the researched business.
+
+    The researched site is the client here, not the target: every row is somebody
+    who buys what the client sells. Leads become real businesses so they can be
+    sequenced like any other lead, but no contact is created - the agent is told
+    never to invent an address, so a hint stays a hint until a human checks it.
+    """
+    found = [x for x in (profile.get("leads") or []) if isinstance(x, dict)]
+    client = None
+    if client_bid:
+        client = conn.execute("SELECT name, domain FROM businesses WHERE id = ?", (client_bid,)).fetchone()
+    client_name = (client["name"] if client else "") or "researched business"
+
+    lid = None
+    if found:
+        list_name = f"Leads for {client_name}"[:120]
+        row = conn.execute(
+            "SELECT id FROM lists WHERE workspace_id = ? AND name = ?", (workspace_id, list_name)
+        ).fetchone()
+        if row:
+            lid = row["id"]
+        else:
+            lid = new_id()
+            conn.execute(
+                "INSERT INTO lists (id, workspace_id, name, created_at) VALUES (?,?,?,?)",
+                (lid, workspace_id, list_name, utcnow()),
+            )
+
+    created = updated = skipped = 0
+    for lead in found:
+        name = str(lead.get("name") or "").strip()
+        domain = _lead_domain(lead.get("domain") or lead.get("website") or "")
+        if not name:
+            skipped += 1
+            continue
+        if domain and domain == _lead_domain((client["domain"] if client else "") or ""):
+            skipped += 1  # the client is not its own lead
+            continue
+        if not str(lead.get("signal_source") or "").strip():
+            skipped += 1  # unsourced signals are guesses, and guesses waste sends
+            continue
+
+        kind = str(lead.get("signal_kind") or "other").strip().lower()
+        if kind not in SIGNAL_KINDS:
+            kind = "other"
+        try:
+            fit = max(0, min(100, int(lead.get("fit") or 0)))
+        except (TypeError, ValueError):
+            fit = 0
+
+        bid = None
+        if domain:
+            biz = conn.execute("SELECT id FROM businesses WHERE domain = ?", (domain,)).fetchone()
+            if biz:
+                bid = biz["id"]
+        if not bid and domain:
+            bid = new_id()
+            conn.execute(
+                """INSERT INTO businesses (id, name, website, domain, source, source_ref,
+                                           fetched_at, created_at, updated_at)
+                   VALUES (?,?,?,?, 'agent_lead', ?, ?, ?, ?)""",
+                (bid, name, f"https://{domain}", domain, client_name[:120], utcnow(),
+                 utcnow(), utcnow()),
+            )
+
+        existing = None
+        if domain:
+            existing = conn.execute(
+                "SELECT id FROM research_leads WHERE client_business_id = ? AND domain = ?",
+                (client_bid, domain),
+            ).fetchone()
+        payload = (
+            name, domain, str(lead.get("why_now") or "")[:600],
+            kind, str(lead.get("signal_detail") or "")[:1200],
+            str(lead.get("signal_source") or "")[:500],
+            str(lead.get("contact_hint") or "")[:300], fit, bid,
+        )
+        if existing:
+            conn.execute(
+                """UPDATE research_leads
+                      SET name = ?, domain = ?, why_now = ?, signal_kind = ?, signal_detail = ?,
+                          signal_source = ?, contact_hint = ?, fit = ?, business_id = COALESCE(?, business_id)
+                    WHERE id = ?""",
+                payload + (existing["id"],),
+            )
+            updated += 1
+        else:
+            conn.execute(
+                """INSERT INTO research_leads (name, domain, why_now, signal_kind, signal_detail,
+                                               signal_source, contact_hint, fit, business_id,
+                                               id, queue_id, workspace_id, client_business_id, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                payload + (new_id(), queue_id, workspace_id, client_bid, utcnow()),
+            )
+            created += 1
+
+        if lid and bid:
+            conn.execute(
+                "INSERT OR IGNORE INTO list_members (list_id, business_id, added_at) VALUES (?,?,?)",
+                (lid, bid, utcnow()),
+            )
+
+    return {"found": len(found), "created": created, "updated": updated,
+            "skipped": skipped, "list_id": lid}
+
+
 class ImportIn(BaseModel):
     workspace_id: str
     profile: dict[str, Any]
@@ -576,14 +703,6 @@ def _upsert_lead(
         saved_email = email
 
     return {"created": created, "business_id": bid, "list_id": lid, "contact_email": saved_email}
-
-
-class ImportIn(BaseModel):
-    workspace_id: str
-    profile: dict[str, Any]
-    category: str | None = None
-    city: str | None = None
-    state: str | None = None
 
 
 @router.post("/research/import")
@@ -765,6 +884,11 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
             )
         elif body.status == "done":
             lead = _upsert_lead(conn, row["workspace_id"], profile)
+            summary = _store_research_leads(
+                conn, row["workspace_id"], qid, lead["business_id"], profile
+            )
+            profile["leads_found"] = summary["created"] + summary["updated"]
+            profile["leads_list_id"] = summary["list_id"]
             conn.execute(
                 "UPDATE research_queue SET status = 'done', business_id = ?, profile = ?,"
                 " draft = ?, error = NULL, finished_at = ? WHERE id = ?",
@@ -786,3 +910,27 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
     finally:
         conn.close()
     return {"ok": True, "item": _queue_item(row)}
+
+
+@router.get("/research/agent-leads")
+def list_research_leads(
+    workspace_id: str, client_business_id: str | None = None, limit: int = 100
+) -> dict:
+    """Every business the agent has found *for* a client, newest signal first.
+
+    Sorted by fit so the operator works the strongest match first; the signal
+    source travels with each row so a claim can always be checked.
+    """
+    conn = connect()
+    try:
+        sql = "SELECT * FROM research_leads WHERE workspace_id = ?"
+        args: list[Any] = [workspace_id]
+        if client_business_id:
+            sql += " AND client_business_id = ?"
+            args.append(client_business_id)
+        sql += " ORDER BY fit DESC, created_at DESC LIMIT ?"
+        args.append(max(1, min(500, limit)))
+        items = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+    return {"items": items, "count": len(items)}

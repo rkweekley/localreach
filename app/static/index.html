@@ -681,7 +681,7 @@ async function rsAgentResearch(url) {
     const secs = Math.round((Date.now() - started) / 1000);
     if (row.status === 'pending' || row.status === 'claimed') {
       wait(row, secs);
-      if (secs > 480) {
+      if (secs > 900) {
         out.innerHTML = '<div class="panel"><div class="empty">Still queued after ' + secs +
           's. The worker may not be running - it is <span class="mono">scripts/hermes_worker.py</span>.</div></div>';
         return;
@@ -727,6 +727,39 @@ function rsShowAgentDraft(draft, profile) {
       toast('Press ctrl+c to copy', '');
     }
   };
+}
+
+function rsAgentLeadsHtml(p) {
+  const leads = Array.isArray(p.leads) ? p.leads : null;
+  if (!leads) return '';
+  const head = '<div style="margin-top:16px"><div class="row" style="justify-content:space-between">' +
+    '<div class="muted" style="font-size:12px">Companies that should be buying from them</div>' +
+    '<span class="pill ' + (leads.length ? 'ok' : 'warn') + '">' + leads.length + ' found</span></div>';
+  if (!leads.length) {
+    return head + '<div class="muted" style="margin-top:6px">The agent read the site but sourced no buying signal this pass. ' +
+      'Run it again, or open the business and add what you already know.</div></div>';
+  }
+  const rows = leads.map((l) => {
+    const fit = l.fit == null ? null : Number(l.fit);
+    const cls = fit == null ? 'lo' : fit >= 70 ? 'hi' : fit >= 45 ? 'mid' : 'lo';
+    const kind = String(l.signal_kind || 'other').replace(/[^a-z]/g, '');
+    const src = /^https?:\/\//i.test(String(l.signal_source || ''))
+      ? '<a class="mono" style="font-size:11.5px" target="_blank" rel="noopener" href="' + esc(l.signal_source) + '">source</a>'
+      : '<span class="muted" style="font-size:11.5px">unsourced</span>';
+    return '<tr><td><div class="strong">' + esc(l.name || 'unnamed') + '</div>' +
+        (l.domain ? '<div class="muted mono" style="font-size:11.5px">' + esc(l.domain) + '</div>' : '') +
+        (l.contact_hint ? '<div class="muted" style="font-size:11.5px">ask for: ' + esc(l.contact_hint) + '</div>' : '') +
+      '</td>' +
+      '<td><span class="pill">' + esc(kind) + '</span>' +
+        (l.signal_detail ? '<div class="muted" style="font-size:11.5px;margin-top:4px">' + esc(l.signal_detail) + '</div>' : '') +
+      '</td>' +
+      '<td style="font-size:12.5px">' + esc(l.why_now || '') + '<div style="margin-top:4px">' + src + '</div></td>' +
+      '<td><span class="fit ' + cls + '">' + (fit == null ? '—' : fit) + '</span></td></tr>';
+  }).join('');
+  return head + '<table style="margin-top:6px"><thead><tr><th>Company</th><th>Signal</th><th>Why now</th><th>Fit</th></tr></thead>' +
+    '<tbody>' + rows + '</tbody></table>' +
+    '<div class="muted" style="font-size:11.5px;margin-top:6px">Saved automatically. No email is invented here, ' +
+      'so verify a contact before anything can send.</div></div>';
 }
 
 function rsRender() {
@@ -775,6 +808,7 @@ function rsRender() {
         '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">Emails on the page</div>' + emails + '</div>' +
         '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">Pages read</div>' +
           '<div class="row" style="flex-wrap:wrap;gap:6px">' + pages + '</div></div>' +
+        rsAgentLeadsHtml(p) +
       '</div>' +
       '<div class="action-bar">' +
         (rs.businessId

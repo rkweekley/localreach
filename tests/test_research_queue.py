@@ -51,7 +51,11 @@ def ws() -> str:
     yield rid
     conn = connect()
     try:
+        conn.execute("DELETE FROM research_leads WHERE workspace_id = ?", (rid,))
         conn.execute("DELETE FROM research_queue WHERE workspace_id = ?", (rid,))
+        conn.execute("DELETE FROM list_members WHERE list_id IN (SELECT id FROM lists WHERE workspace_id = ?)", (rid,))
+        conn.execute("DELETE FROM lists WHERE workspace_id = ?", (rid,))
+        conn.execute("DELETE FROM businesses WHERE source = 'agent_lead'")
         ids = [r["id"] for r in conn.execute(
             "SELECT id FROM businesses WHERE domain = ?", (PROFILE["domain"],))]
         for biz_id in ids:
@@ -161,3 +165,125 @@ def test_a_nameless_profile_fails_loudly(ws):
                json={"status": "done", "profile": {"domain": "nameless.example.net"}})
     assert r.json()["item"]["status"] == "error"
     assert "no company name" in r.json()["item"]["error"]
+
+
+LEADS = [
+    {
+        "name": "Scioto Valley Builders",
+        "domain": "https://www.sciotovalleybuilders.com/about",
+        "why_now": "Posting for two equipment operators this month, so they are staffing up for site work.",
+        "signal_kind": "hiring",
+        "signal_detail": "Careers page lists 2x Heavy Equipment Operator, posted 3 days ago.",
+        "signal_source": "https://sciotovalleybuilders.com/careers",
+        "contact_hint": "Dana Whitfield, office manager (careers page)",
+        "fit": 88,
+    },
+    {
+        "name": "Groveport Presbyterian Church",
+        "domain": "groveportpres.org",
+        "why_now": "Approved a parking lot expansion at last week's session meeting.",
+        "signal_kind": "expansion",
+        "signal_detail": "Session minutes approve lot restriping and a 40-space addition.",
+        "signal_source": "https://groveportpres.org/session-minutes",
+        "contact_hint": "trustee",
+        "fit": 61,
+    },
+    {
+        # No signal_source: the agent read nothing, so this must not become a lead.
+        "name": "Buckeye Ridge Roofing",
+        "domain": "buckeyeridge.com",
+        "why_now": "They are a roofer, they must need roofers.",
+        "signal_kind": "other",
+        "fit": 90,
+    },
+]
+
+
+def _completed_with_leads(ws, profile=None):
+    item = c.post("/api/research/queue", json={"workspace_id": ws, "url": "buckeyeridge.com"}).json()["item"]
+    c.post("/api/research/queue/claim", json={"workspace_id": ws, "limit": 5})
+    body = dict(PROFILE if profile is None else profile)
+    body["leads"] = LEADS
+    r = c.post(f"/api/research/queue/{item['id']}/complete", json={"status": "done", "profile": body})
+    assert r.status_code == 200, r.text
+    return r.json()["item"]
+
+
+def test_agent_leads_are_saved_for_the_client(ws):
+    item = _completed_with_leads(ws)
+    assert item["status"] == "done", item.get("error")
+    profile = item["profile"]
+    # One unsourced lead was dropped, so two survive.
+    assert profile["leads_found"] == 2
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM research_leads WHERE client_business_id = ? ORDER BY fit DESC",
+            (item["business_id"],),
+        ).fetchall()
+        assert [r["name"] for r in rows] == ["Scioto Valley Builders", "Groveport Presbyterian Church"]
+        assert all(r["queue_id"] == item["id"] for r in rows)
+        assert all(r["client_business_id"] == item["business_id"] for r in rows)
+        assert rows[0]["signal_kind"] == "hiring"
+        assert rows[0]["signal_source"].endswith("/careers")
+        # A bare URL's host is stored without scheme or www.
+        assert rows[0]["domain"] == "sciotovalleybuilders.com"
+        # Leads are real businesses so they can be sequenced like any other.
+        biz = conn.execute("SELECT * FROM businesses WHERE domain = ?", ("sciotovalleybuilders.com",)).fetchone()
+        assert biz is not None and biz["id"] == rows[0]["business_id"]
+        assert biz["source"] == "agent_lead"
+    finally:
+        conn.close()
+
+
+def test_agent_leads_land_in_a_list_named_after_the_client(ws):
+    item = _completed_with_leads(ws)
+    list_id = item["profile"]["leads_list_id"]
+    assert list_id
+    conn = connect()
+    try:
+        lst = conn.execute("SELECT * FROM lists WHERE id = ?", (list_id,)).fetchone()
+        assert lst["name"] == "Leads for Buckeye Ridge Roofing"
+        n = conn.execute("SELECT COUNT(*) n FROM list_members WHERE list_id = ?", (list_id,)).fetchone()["n"]
+        assert n == 2
+    finally:
+        conn.close()
+
+
+def test_a_second_pass_updates_instead_of_duplicating(ws):
+    first = _completed_with_leads(ws)
+    second = _completed_with_leads(ws)
+    assert second["profile"]["leads_found"] == 2
+    conn = connect()
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) n FROM research_leads WHERE client_business_id = ?",
+            (first["business_id"],),
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 2
+
+
+def test_agent_leads_are_readable_over_the_api(ws):
+    item = _completed_with_leads(ws)
+    r = c.get("/api/research/agent-leads", params={"workspace_id": ws,
+                                                  "client_business_id": item["business_id"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    assert body["items"][0]["name"] == "Scioto Valley Builders"
+    assert body["items"][0]["why_now"]
+
+
+def test_a_lead_never_invents_a_contact(ws):
+    item = _completed_with_leads(ws)
+    conn = connect()
+    try:
+        for lead in conn.execute("SELECT * FROM research_leads WHERE client_business_id = ?",
+                                 (item["business_id"],)).fetchall():
+            contacts = conn.execute("SELECT COUNT(*) n FROM contacts WHERE business_id = ?",
+                                    (lead["business_id"],)).fetchone()["n"]
+            assert contacts == 0, "lead discovery must not fabricate contacts"
+    finally:
+        conn.close()

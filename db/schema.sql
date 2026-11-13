@@ -248,6 +248,32 @@ CREATE TABLE IF NOT EXISTS research_queue (
 CREATE INDEX IF NOT EXISTS idx_rq_pending ON research_queue (status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_rq_ws ON research_queue (workspace_id, requested_at);
 
+-- Leads the agent discovered *for* a researched business. The researched domain
+-- is the client (the seller); every row here is a company that buys what the
+-- client sells, plus the signal that makes them worth contacting now. A lead is
+-- only worth keeping if the signal was read somewhere real, so signal_source is
+-- the URL the agent actually opened.
+CREATE TABLE IF NOT EXISTS research_leads (
+  id            TEXT PRIMARY KEY,
+  queue_id      TEXT REFERENCES research_queue(id),
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id),
+  client_business_id TEXT REFERENCES businesses(id),  -- the researched business
+  business_id   TEXT REFERENCES businesses(id),       -- the prospect, once created
+  name          TEXT NOT NULL,
+  domain        TEXT,
+  why_now       TEXT,                  -- one sentence: why contact them this week
+  signal_kind   TEXT,                  -- hiring | permit | expansion | review | rfp | license | news | social | other
+  signal_detail TEXT,
+  signal_source TEXT,                  -- URL the signal was read on
+  contact_hint  TEXT,                  -- named person/role found, never a guessed address
+  fit           INTEGER,               -- 0-100 match to the client's best customer
+  created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rlead_client ON research_leads (client_business_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_rlead_ws ON research_leads (workspace_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rlead_dedupe
+  ON research_leads (client_business_id, domain) WHERE domain IS NOT NULL AND domain != '';
+
 -- Search-task queue: steps whose channel is 'call'/'linkedin' land here instead
 -- of being sent by email. This is what turns unreachable leads into work.
 CREATE TABLE IF NOT EXISTS tasks (

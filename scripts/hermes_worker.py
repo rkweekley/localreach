@@ -42,21 +42,45 @@ BATCH = max(1, min(int(os.environ.get("BATCH", "1") or 1), 5))
 TIMEOUT = int(os.environ.get("AGENT_TIMEOUT_S", "300") or 300)
 DRY_RUN = (os.environ.get("DRY_RUN", "1") or "1").strip().lower() not in ("0", "false", "no", "off")
 
-PROMPT = """You are researching one sales prospect for a cold email. Use your web tools to read the company's own website, then return the findings.
+PROMPT = """You are a lead researcher. Today's domain belongs to a BUSINESS WE WANT TO SELL TO, and that same business also needs customers of its own. Do two jobs in one turn: profile them, then find companies that should be buying from them right now.
 
 Domain: {domain}
 
-Rules:
+Read their site first. Work out what they sell, who pays them, and where they work (city/region).
+
+Then hunt for LEADS FOR THEM. A lead is a company that buys what this business sells and shows a signal that they need it now. Think like a local salesperson who reads the town, not like a directory scraper. Signals worth chasing:
+
+- HIRING: they are advertising roles in the trade they would outsource or buy in. A company hiring equipment operators needs excavation. Hiring "marketing coordinator" means they are investing in growth. Check their own /careers, /jobs pages, LinkedIn jobs, Indeed, industry job boards, Facebook posts, Craigslist.
+- PERMITS AND FILINGS: new building permits, demolition, rezoning, utility taps, state contractor licence lookups, new LLC registrations, liquor or health licences.
+- RFPs AND PUBLIC MONEY: city council agendas, school board minutes, county bid portals, state procurement notices, bid tabulations.
+- EXPANSION: new location, new branch, ribbon cutting, franchise opening, press release, acquisition, funding round, "now serving" announcement.
+- PAIN: reviews complaining about exactly the problem this business fixes, an outdated website, no online booking, one-star service complaints, a competitor closing.
+- EVENT-DRIVEN NEED: storm, hail, flood, freeze, fire, highway project, new subdivision plat, warehouse groundbreaking.
+- SUPPLY CHAIN: subcontractors and suppliers publicly listed on a general contractor's project page; vendors named in a permit or bid.
+- DIRECTORIES: chamber of commerce member lists, trade association rosters, BBB new members, Yelp/Google "newly opened", local Facebook groups where somebody asks for a recommendation in this trade.
+- COMPETITOR OVERFLOW: companies that publicly complain about a competitor or post a job that the competitor just lost.
+
+Rules for leads:
+- Work fast: the whole turn must finish in about five minutes, so cap yourself at 8 lookups. If a lead's signal cannot be confirmed in one or two reads, drop it and move on.
+- Each lead must be a real company you found, with a domain where you can. Prefer 3 leads you actually verified over 8 you guessed.
+- Every lead needs a signal you READ, not inferred. Put the exact URL you read in signal_source. If you cannot source it, drop the lead.
+- why_now is one sentence: what changed, and why that means they need this business this month.
+- contact_hint is a named person or role you actually saw (owner, estimator, project manager, office manager) plus where you saw it. Never invent an email address; if you saw a role mailbox only, say so.
+- fit is 0-100: how closely this lead matches the customers this business is built to serve.
+- Do not list the researched business itself, its competitors' obvious aliases, or national chains that will never buy locally.
+
+Also fill `icp`: the best-customer profile in plain words, and `buying_signals`: the trigger events that make that customer act.
+
+Rules for the profile:
 - Only state facts you actually read on that site. Never invent an email address or phone number.
 - `service_area` is "City, ST" when the site names one; leave it "" if it does not.
 - `what_they_do` is one plain sentence a stranger would understand.
-- `talking_point` is one specific, quotable detail from the site that proves a human looked at it (a service, a named customer type, a guarantee, a years-in-business claim).
-- The email is 60-90 words, first person, no greeting line like "I hope this finds you well", no flattery, one concrete observation from their site, one sentence on what we do, one low-friction question. No em dashes. Sign as Ryan.
+- `talking_point` is one specific, quotable detail from the site that proves a human looked at it.
+- The draft is an email to the researched business itself, offering what WE do: 60-90 words, first person, no "I hope this finds you well", no flattery, one concrete observation from their site, one sentence on what we do, one low-friction question. No em dashes. Sign as Ryan.
 - The subject is 6 words max, specific, no clickbait, no colon. Keep company and place names capitalized.
 
 Return ONLY this JSON object, no prose, no code fence:
-{{"profile": {{"business_name": "", "what_they_do": "", "industry": "", "customers": "", "service_area": "", "talking_point": "", "services": [], "differentiators": [], "emails": [], "phones": [], "url": "https://{domain}", "domain": "{domain}"}}, "draft": {{"subject": "", "body": "", "grounded_on": ""}}}}
-"""
+{{"profile": {{"business_name": "", "what_they_do": "", "industry": "", "customers": "", "service_area": "", "talking_point": "", "services": [], "differentiators": [], "emails": [], "phones": [], "icp": "", "buying_signals": [], "url": "https://{domain}", "domain": "{domain}"}}, "leads": [{{"name": "", "domain": "", "why_now": "", "signal_kind": "hiring|permit|expansion|review|rfp|license|news|social|other", "signal_detail": "", "signal_source": "https://...", "contact_hint": "", "fit": 80}}], "draft": {{"subject": "", "body": "", "grounded_on": ""}}}}"""
 
 
 def log(msg: str) -> None:
@@ -167,9 +191,15 @@ def handle_item(item: dict) -> None:
     # The Hermes agent structured this profile with a model, so say so: the
     # UI otherwise labels agent output "page only" and understates the work.
     profile["used_llm"] = True
+    leads = [x for x in (result.get("leads") or []) if isinstance(x, dict)]
+    profile["leads"] = leads
     draft = result.get("draft") or None
     log(f"{domain}: {profile.get('business_name')!r} | {len(profile.get('services') or [])} services"
-        f" | emails={profile.get('emails')} | draft={'yes' if draft else 'no'}")
+        f" | emails={profile.get('emails')} | draft={'yes' if draft else 'no'}"
+        f" | leads={len(leads)}")
+    for lead in leads[:8]:
+        log(f"{domain}:   lead {lead.get('name')!r} signal={lead.get('signal_kind')}"
+            f" fit={lead.get('fit')} src={lead.get('signal_source')}")
     if DRY_RUN:
         log(f"{domain}: DRY_RUN=1, not writing back. Payload: {json.dumps(result)[:600]}")
         return
