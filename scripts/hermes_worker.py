@@ -164,6 +164,9 @@ def handle_item(item: dict) -> None:
         return
 
     profile = result.get("profile") or {}
+    # The Hermes agent structured this profile with a model, so say so: the
+    # UI otherwise labels agent output "page only" and understates the work.
+    profile["used_llm"] = True
     draft = result.get("draft") or None
     log(f"{domain}: {profile.get('business_name')!r} | {len(profile.get('services') or [])} services"
         f" | emails={profile.get('emails')} | draft={'yes' if draft else 'no'}")
