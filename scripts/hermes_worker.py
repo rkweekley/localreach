@@ -15,7 +15,7 @@ Environment:
   WORKSPACE_ID      workspace to drain; auto-detected when exactly one exists
   HERMES_BIN        hermes executable (default "hermes")
   BATCH             items per run (default 1, capped at 5)
-  AGENT_TIMEOUT_S   per-item agent budget (default 300)
+  AGENT_TIMEOUT_S   per-item agent budget (default 840)
   DRY_RUN           1 = claim and research but never write back (default 1)
 
 Usage:
@@ -39,7 +39,9 @@ TOKEN = os.environ.get("LOCALREACH_TOKEN", "")
 WORKSPACE = os.environ.get("WORKSPACE_ID", "")
 HERMES = os.environ.get("HERMES_BIN", "hermes")
 BATCH = max(1, min(int(os.environ.get("BATCH", "1") or 1), 5))
-TIMEOUT = int(os.environ.get("AGENT_TIMEOUT_S", "300") or 300)
+# A lead-hunting turn measures 200-350s; a bare --domain run must not inherit a
+# budget that kills it. The wrapper sets the same value; keep them in step.
+TIMEOUT = int(os.environ.get("AGENT_TIMEOUT_S", "840") or 840)
 DRY_RUN = (os.environ.get("DRY_RUN", "1") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 PROMPT = """You are a lead researcher. Today's domain belongs to a BUSINESS WE WANT TO SELL TO, and that same business also needs customers of its own. Do two jobs in one turn: profile them, then find companies that should be buying from them right now.
