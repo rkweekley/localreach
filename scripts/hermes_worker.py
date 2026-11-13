@@ -67,6 +67,7 @@ Rules for leads:
 - why_now is one sentence: what changed, and why that means they need this business this month.
 - contact_hint is a named person or role you actually saw (owner, estimator, project manager, office manager) plus where you saw it. Never invent an email address; if you saw a role mailbox only, say so.
 - fit is 0-100: how closely this lead matches the customers this business is built to serve.
+- To find HIRING leads, search job listings for the client's trade plus its metro: Indeed, ZipRecruiter, Craigslist jobs, the local paper's classifieds, and local Facebook job groups. A company advertising for the trade the client sells is the strongest lead there is, so read the posting and quote the role in signal_detail.
 - Do not list the researched business itself, its competitors' obvious aliases, or national chains that will never buy locally.
 
 Also fill `icp`: the best-customer profile in plain words, and `buying_signals`: the trigger events that make that customer act.
