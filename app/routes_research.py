@@ -560,6 +560,14 @@ def _store_research_leads(
                 "SELECT id FROM research_leads WHERE client_business_id = ? AND domain = ?",
                 (client_bid, domain),
             ).fetchone()
+        if existing is None:
+            # A lead with no site of its own still has to dedupe, or every run
+            # re-adds it and the list fills with the same company.
+            existing = conn.execute(
+                "SELECT id FROM research_leads WHERE client_business_id = ? "
+                "AND COALESCE(domain, '') = '' AND lower(name) = lower(?)",
+                (client_bid, name),
+            ).fetchone()
         payload = (
             name, domain, str(lead.get("why_now") or "")[:600],
             kind, str(lead.get("signal_detail") or "")[:1200],

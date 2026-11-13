@@ -276,6 +276,31 @@ def test_agent_leads_are_readable_over_the_api(ws):
     assert body["items"][0]["why_now"]
 
 
+def test_a_lead_without_a_site_still_dedupes_on_name(ws):
+    # Production runs repeat the same client; a lead with no domain of its own
+    # would otherwise be re-added every time and clutter the list.
+    first = _completed_with_leads(ws)
+    conn = connect()
+    try:
+        conn.execute(
+            "UPDATE research_leads SET domain = NULL WHERE client_business_id = ? AND name = ?",
+            (first["business_id"], "Groveport Presbyterian Church"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _completed_with_leads(ws)
+    conn = connect()
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) n FROM research_leads WHERE client_business_id = ? AND name = ?",
+            (first["business_id"], "Groveport Presbyterian Church"),
+        ).fetchone()["n"]
+        assert n == 1
+    finally:
+        conn.close()
+
+
 def test_a_lead_never_invents_a_contact(ws):
     item = _completed_with_leads(ws)
     conn = connect()
