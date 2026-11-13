@@ -10,11 +10,13 @@ Rules (non-negotiable, they are the difference between an asset and a lawsuit):
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import os
 from dataclasses import dataclass
 
+from .config import get_settings
 from .db import connect, rows, utcnow
 
 ROLE_PREFIXES = (
@@ -34,12 +36,36 @@ class Verdict:
 
 
 def _secret() -> str:
-    return os.getenv("UNSUB_SECRET", "dev-secret-change-me")
+    return os.getenv("UNSUB_SECRET") or get_settings().unsub_secret
 
 
 def unsubscribe_token(workspace_id: str, email: str) -> str:
-    msg = f"{workspace_id}:{email.lower()}".encode()
-    return hmac.new(_secret().encode(), msg, hashlib.sha256).hexdigest()[:32]
+    """Self-contained token: `u2.<b64url(email)>.<hmac>`.
+
+    The address is embedded so a clicked link can unsubscribe without the
+    recipient typing anything — the old 32-hex token had no address in it, so
+    the landing-page form submitted an empty field and silently unsubscribed
+    nobody. The HMAC still binds the address to the workspace, so a token for
+    one address cannot be replayed against another.
+    """
+    email_n = email.lower().strip()
+    body = base64.urlsafe_b64encode(email_n.encode()).decode().rstrip("=")
+    msg = f"{workspace_id}:{email_n}".encode()
+    sig = hmac.new(_secret().encode(), msg, hashlib.sha256).hexdigest()[:32]
+    return f"u2.{body}.{sig}"
+
+
+def token_email(token: str) -> str | None:
+    """Extract the address from a v2 token. Returns None if malformed."""
+    parts = (token or "").split(".")
+    if len(parts) != 3 or parts[0] != "u2":
+        return None
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        email = base64.urlsafe_b64decode(padded).decode().strip().lower()
+    except Exception:  # noqa: BLE001 - any decode failure is just an invalid token
+        return None
+    return email if "@" in email else None
 
 
 def verify_token(workspace_id: str, email: str, token: str) -> bool:
@@ -95,7 +121,7 @@ def check_send(workspace_id: str, to_email: str, email_status: str, from_email: 
     if email_status != "verified":
         return Verdict(False, "unverified",
                        f"email_status={email_status}; only verified addresses are mailable")
-    if is_role_address(to_email) and os.getenv("ALLOW_ROLE_ADDRESSES", "0") != "1":
+    if is_role_address(to_email) and not get_settings().allow_role_addresses:
         return Verdict(False, "role_address",
                        f"{to_email} is a role mailbox; set ALLOW_ROLE_ADDRESSES=1 to override")
     reason = suppressed(workspace_id, to_email)

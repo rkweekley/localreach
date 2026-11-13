@@ -1,0 +1,58 @@
+# LocalReach on the Mac mini.
+#
+# The app publishes no port: Nginx Proxy Manager is on the same Docker network
+# and reaches it as http://localreach:8000. The loopback publish below exists
+# only so you can `curl 127.0.0.1:8000/health` from the Mac itself while
+# debugging — delete it once the proxy host works.
+services:
+  localreach:
+    build: .
+    image: localreach:1.0.0
+    container_name: localreach
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - localreach-data:/data
+      - ./outbox:/app/outbox
+    networks:
+      - npm
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  # Same image, different entrypoint: the send loop is a separate process so a
+  # web restart never interrupts an in-flight batch, and two workers cannot
+  # double-send because each enrollment is claimed before it is touched.
+  worker:
+    image: localreach:1.0.0
+    container_name: localreach-worker
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.worker"]
+    volumes:
+      - localreach-data:/data
+      - ./outbox:/app/outbox
+    networks:
+      - npm
+    depends_on:
+      localreach:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  localreach-data:
+
+networks:
+  npm:
+    external: true
+    name: nginx-proxy-manager_default

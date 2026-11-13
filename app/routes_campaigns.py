@@ -9,12 +9,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from . import ai, compliance, mailer
+from . import ai, compliance, mailer, schedule
+from .config import get_settings
 from .db import connect, new_id, rows, utcnow
 
 router = APIRouter(prefix="/api", tags=["campaigns"])
@@ -96,7 +98,7 @@ def enroll(sequence_id: str, body: EnrollIn) -> dict:
                 continue
             verdict = compliance.check_send(
                 seq["workspace_id"], contact["email"], contact["email_status"],
-                os.getenv("MAILGUN_SENDER", ""), 10**6,
+                get_settings().mailgun_sender, 10**6,
             )
             if not verdict and body.skip_blocked:
                 skipped.append({"business_id": bid, "reason": verdict.reason})
@@ -126,6 +128,10 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
     """Send every message that is due. Returns a per-recipient audit trail."""
     conn = connect()
     results: list[dict] = []
+    settings = get_settings()
+    run_id = uuid.uuid4().hex[:12]
+    # A claim older than this is from a worker that died mid-send.
+    claim_stale = (datetime.now(timezone.utc) - timedelta(minutes=15)).isoformat()
     try:
         ws = conn.execute("SELECT * FROM workspaces WHERE id = ?", (workspace_id,)).fetchone()
         if not ws:
@@ -135,7 +141,7 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
         ).fetchone()
 
         due = rows(conn.execute(
-            """SELECT e.*, s.stop_on_reply, s.name AS seq_name FROM enrollments e
+            """SELECT e.*, s.stop_on_reply, s.send_window, s.name AS seq_name FROM enrollments e
                JOIN sequences s ON s.id = e.sequence_id
                WHERE s.workspace_id = ? AND e.status = 'active'
                  AND (e.next_send_at IS NULL OR e.next_send_at <= ?)
@@ -144,6 +150,23 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
         ))
 
         for en in due:
+            # Claim before doing any work: a manual tick and a timer tick can
+            # overlap, and double-sending one prospect burns the whole domain.
+            claimed = conn.execute(
+                """UPDATE enrollments SET claimed_at = ?, claimed_by = ?
+                   WHERE id = ? AND (claimed_at IS NULL OR claimed_at < ?)""",
+                (utcnow(), run_id, en["id"], claim_stale),
+            ).rowcount
+            conn.commit()
+            if not claimed:
+                continue
+            if not schedule.is_open(en["send_window"], settings.send_tz):
+                # Leave next_send_at untouched so it goes out when the window
+                # opens instead of being silently dropped.
+                results.append({"enrollment": en["id"], "status": "outside_send_window",
+                                "window": en["send_window"]})
+                continue
+
             step = conn.execute(
                 """SELECT * FROM sequence_steps WHERE sequence_id = ? AND step_order = ?
                    AND variant_of IS NULL LIMIT 1""",
@@ -156,7 +179,8 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
             if step["channel"] != "email":
                 # call/linkedin tasks surface in the task queue; the worker skips them
                 conn.execute(
-                    "UPDATE enrollments SET current_step = current_step + 1, next_send_at = ? WHERE id = ?",
+                    """UPDATE enrollments SET current_step = current_step + 1, next_send_at = ?,
+                       claimed_at = NULL, claimed_by = NULL WHERE id = ?""",
                     ((datetime.now(timezone.utc) + timedelta(days=step["delay_days"])).isoformat(), en["id"]),
                 )
                 results.append({"enrollment": en["id"], "status": "task_only", "channel": step["channel"]})
@@ -169,8 +193,8 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
                 results.append({"enrollment": en["id"], "status": "stopped", "reason": "missing_data"})
                 continue
 
-            from_email = os.getenv("MAILGUN_SENDER", "outreach@example.com")
-            from_name = os.getenv("MAILGUN_SENDER_NAME", ws["name"])
+            from_email = settings.mailgun_sender
+            from_name = settings.mailgun_sender_name or ws["name"]
             verdict = compliance.check_send(
                 workspace_id, contact["email"], contact["email_status"], from_email, ws["daily_send_cap"]
             )
@@ -202,13 +226,11 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
             body += compliance.footer(dict(ws), token)
             subject = render(step["subject_template"] or "", ctx)
 
+            unsub_url = f"{settings.public_base_url}/u/{token}"
             sent = mailer.send(
                 from_email, from_name, contact["email"], subject, body,
-                reply_to=os.getenv("MAILGUN_REPLY_TO", from_email),
-                headers={
-                    "List-Unsubscribe": f"<{os.getenv('PUBLIC_BASE_URL','http://localhost:8000')}/u/{token}>",
-                    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
-                },
+                reply_to=settings.mailgun_reply_to or from_email,
+                headers=mailer.build_unsub_headers(unsub_url),
             )
 
             mid = new_id()
@@ -237,7 +259,8 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
                 if nxt:
                     next_at = (datetime.now(timezone.utc) + timedelta(days=nxt["delay_days"])).isoformat()
                 conn.execute(
-                    "UPDATE enrollments SET current_step = ?, next_send_at = ? WHERE id = ?",
+                    """UPDATE enrollments SET current_step = ?, next_send_at = ?,
+                       claimed_at = NULL, claimed_by = NULL WHERE id = ?""",
                     (step["step_order"], next_at, en["id"]),
                 )
                 if next_at is None:

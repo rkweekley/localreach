@@ -1,7 +1,10 @@
 """Smoke tests: the guarantees that matter, not coverage theatre."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +13,20 @@ from app import ai, compliance
 from app.db import connect, init_db, new_id, utcnow
 from app.main import app
 
-c = TestClient(app)
+AUTH = {"Authorization": f"Bearer {os.environ['API_TOKEN']}"}
+c = TestClient(app, headers=AUTH)
+
+
+def _signed(payload: dict) -> dict:
+    """Mailgun posts its own HMAC; the test has to forge it the same way."""
+    ts = str(int(time.time()))
+    tok = "test-webhook-token"
+    sig = hmac.new(
+        os.environ["MAILGUN_SIGNING_KEY"].encode(),
+        f"{ts}{tok}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return {**payload, "timestamp": ts, "token": tok, "signature": sig}
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -111,10 +127,10 @@ def test_inbound_reply_stops_sequence_and_suppresses():
     c.post(f"/api/sequences/{seq['id']}/activate")
     c.post(f"/api/sequences/{seq['id']}/enroll", json={"business_ids": [bid]})
 
-    r = c.post("/webhooks/mailgun/inbound", json={
+    r = c.post("/webhooks/mailgun/inbound", json=_signed({
         "sender": "owner@replygarage.com", "subject": "Re: Hi",
         "stripped-text": "Take me off your list.",
-    }).json()
+    })).json()
     assert r["intent"] == "unsubscribe"
     assert r["sequences_stopped"] == 1
     assert compliance.suppressed(ws["id"], "owner@replygarage.com") == "unsubscribe"
@@ -127,6 +143,72 @@ def test_one_click_unsubscribe_token():
     assert compliance.verify_token("ws1", "a@b.com", tok)
     assert not compliance.verify_token("ws2", "a@b.com", tok)
     assert not compliance.verify_token("ws1", "a@b.com", tok[:-1] + "0")
+    # the address travels inside the token, which is what makes one-click work
+    assert compliance.token_email(tok) == "a@b.com"
+
+
+def test_unsubscribe_link_needs_only_one_click_and_no_body():
+    ws = c.post("/api/workspaces", json={
+        "name": "Unsub Co", "slug": "unsub-co", "physical_address": "6 Main St",
+    }).json()
+    c.post("/api/businesses/import", json=[{
+        "name": "Unsub Garage", "category": "garage_door_repair", "city": "Columbus",
+        "state": "OH", "source": "osm", "source_ref": "t:9",
+        "contact_email": "quit@unsubco.com", "contact_name": "Q", "email_status": "verified",
+    }])
+    tok = compliance.unsubscribe_token(ws["id"], "quit@unsubco.com")
+
+    page = c.get(f"/u/{tok}")
+    assert page.status_code == 200 and "quit@unsubco.com" in page.text
+    # GET must never opt anyone out: mail scanners and providers prefetch links.
+    assert not compliance.suppressed(ws["id"], "quit@unsubco.com")
+
+    r = c.post(f"/u/{tok}")  # RFC 8058 one-click: empty body, no form fields
+    assert r.status_code == 200 and r.json()["applied"] >= 1
+    assert compliance.suppressed(ws["id"], "quit@unsubco.com") == "unsubscribed"
+    assert compliance.check_send(
+        ws["id"], "quit@unsubco.com", "verified", "info@cyberalsolutions.com", 100
+    ).reason == "suppressed"
+
+
+def test_webhooks_reject_unsigned_and_forged_requests():
+    forged = {"sender": "victim@target.com", "subject": "x", "stripped-text": "remove me"}
+    # no signature at all
+    assert c.post("/webhooks/mailgun/inbound", json=forged).status_code == 401
+    # correct shape, wrong digest
+    bad = _signed(forged)
+    bad["signature"] = "0" * 64
+    assert c.post("/webhooks/mailgun/inbound", json=bad).status_code == 401
+    # a captured request replayed much later
+    stale = _signed(forged)
+    stale["timestamp"] = str(int(time.time()) - 7200)
+    assert c.post("/webhooks/mailgun/inbound", json=stale).status_code == 401
+    assert not compliance.suppressed("", "victim@target.com")
+
+
+def test_api_requires_the_bearer_token():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    anon = TestClient(app)
+    assert anon.get("/api/search", params={"city": "Columbus"}).status_code == 401
+    assert anon.post("/api/workspaces", json={"name": "X", "slug": "x"}).status_code == 401
+    assert anon.get("/health").status_code == 200
+
+
+def test_send_windows_are_enforced():
+    from datetime import datetime, timezone
+    from app import schedule
+
+    assert schedule.is_open("always", "America/New_York")
+    # 04:00 UTC = 23:00 the previous evening in New York: outside 9-17
+    late = datetime(2026, 11, 13, 4, 0, tzinfo=timezone.utc)
+    assert not schedule.is_open("daily_9_17", "America/New_York", now=late)
+    noon_et = datetime(2026, 11, 13, 17, 0, tzinfo=timezone.utc)
+    assert schedule.is_open("daily_9_17", "America/New_York", now=noon_et)
+    # a broken spec must not silence the worker
+    assert schedule.is_open("garbage", "America/New_York")
+    assert schedule.next_open("daily_9_17", "America/New_York", now=late) is not None
 
 
 def test_agent_builds_a_draft_campaign():

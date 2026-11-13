@@ -10,7 +10,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY db ./db
 
-RUN useradd -m -u 10001 localreach && mkdir -p /data && chown -R localreach /data
+RUN useradd -m -u 10001 localreach \
+    && mkdir -p /data /app/outbox \
+    && chown -R localreach:localreach /data /app/outbox
 USER localreach
 
 EXPOSE 8000

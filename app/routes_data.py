@@ -36,6 +36,20 @@ def create_workspace(w: WorkspaceIn) -> dict:
         conn.close()
 
 
+@router.get("/workspaces")
+def list_workspaces() -> list[dict]:
+    """Operational visibility: what this instance actually serves.
+
+    Also the cheapest authenticated probe for a deploy check — if this answers
+    with the token and 401s without it, auth is wired correctly.
+    """
+    conn = connect()
+    try:
+        return rows(conn.execute("SELECT * FROM workspaces ORDER BY created_at"))
+    finally:
+        conn.close()
+
+
 class BusinessIn(BaseModel):
     name: str
     category: str | None = None
