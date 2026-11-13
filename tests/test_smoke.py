@@ -237,6 +237,19 @@ def test_root_is_a_service_identity_not_a_404():
     assert body["status"] == "ok"
 
 
+def test_worker_heartbeat_and_db_dir_are_self_creating(tmp_path):
+    """A fresh volume path must work; the worker's liveness probe depends on it."""
+    from app import db as dbmod
+    from app.worker import heartbeat
+
+    assert heartbeat(str(tmp_path / "sub" / "worker.heartbeat")) is None
+    assert (tmp_path / "sub" / "worker.heartbeat").read_text().strip().isdigit()
+
+    conn = dbmod.sqlite3.connect(":memory:")
+    conn.close()
+    assert dbmod.db_path().endswith(".db")
+
+
 def test_creating_the_same_workspace_twice_is_idempotent():
     """A re-run deploy probe must not 500 on a UNIQUE constraint."""
     payload = {"name": "Idem Co", "slug": "idem-co", "physical_address": "9 Main St"}

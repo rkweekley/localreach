@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
@@ -36,6 +37,17 @@ def workspaces() -> list[str]:
         return [r["id"] for r in rows(conn.execute("SELECT id FROM workspaces"))]
     finally:
         conn.close()
+
+
+def heartbeat(path: str) -> None:
+    """Touch a file each pass so the container's healthcheck can tell a live
+    worker from a wedged one. Best-effort: never let it break sending."""
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(str(int(time.time())))
+    except OSError:
+        log.warning("heartbeat write failed", extra={"extra_fields": {"path": path}})
 
 
 def pass_once(limit: int) -> dict:
@@ -67,11 +79,15 @@ def main() -> int:
         "dry_run": settings.dry_run, "interval": settings.worker_interval_s,
         "tz": settings.send_tz}})
 
+    beat = os.path.join(os.path.dirname(settings.db_path) or ".", "worker.heartbeat")
+
     if args.once:
+        heartbeat(beat)
         pass_once(settings.worker_limit)
         return 0
 
     while _running:
+        heartbeat(beat)
         pass_once(settings.worker_limit)
         # Sleep in short slices so SIGTERM lands promptly instead of after a
         # full interval (Docker sends SIGKILL 10s after SIGTERM).

@@ -34,7 +34,11 @@ def new_id() -> str:
 def connect() -> sqlite3.Connection:
     # timeout=15 + WAL: without these, a webhook writing while the send worker
     # holds a transaction fails with "database is locked" under any concurrency.
-    conn = sqlite3.connect(db_path(), timeout=15)
+    path = db_path()
+    parent = os.path.dirname(path)
+    if parent:  # a misconfigured LOCALREACH_DB must not fail as "unable to open database file"
+        os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
