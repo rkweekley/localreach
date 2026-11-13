@@ -155,6 +155,7 @@
     <nav class="nav" id="nav">
       <button data-view="overview" class="on"><span class="ico">◧</span> Overview</button>
       <button data-view="leads"><span class="ico">◎</span> Leads</button>
+      <button data-view="research"><span class="ico">✧</span> Research</button>
       <button data-view="sequences"><span class="ico">⇉</span> Sequences</button>
       <button data-view="outbox"><span class="ico">✉</span> Outbox</button>
       <button data-view="voice"><span class="ico">✎</span> Voice</button>
@@ -325,6 +326,7 @@ async function render() {
   try {
     if (state.view === "overview") await viewOverview(v);
     else if (state.view === "leads") await viewLeads(v);
+    else if (state.view === "research") await viewResearch(v);
     else if (state.view === "sequences") await viewSequences(v);
     else if (state.view === "outbox") await viewOutbox(v);
     else if (state.view === "voice") await viewVoice(v);
@@ -582,6 +584,280 @@ async function leadModal(id) {
     '<button class="btn ghost sm" data-close>Close</button>');
 }
 const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="k">' + esc(k) + '</div><div style="margin-top:4px">' + esc(v) + "</div></div>";
+
+/* ---------------- research ---------------- */
+async function viewResearch(v) {
+  v.innerHTML =
+    '<div class="h"><div><h2>Research</h2><p>Paste a domain. This instance reads the site, learns what the business actually sells, finds matching local leads, then writes the email.</p></div>' +
+      '<div class="row" id="rsStatus"><span class="pill info">checking model</span></div></div>' +
+    '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
+      '<div class="row" style="align-items:flex-end;gap:8px">' +
+        '<div class="field" style="flex:1;min-width:240px"><label>Prospect domain</label>' +
+          '<input id="rsUrl" placeholder="buckeyeridgeroofing.com" autocomplete="off" spellcheck="false"></div>' +
+        '<button class="btn" id="rsGo">Research site</button>' +
+        '<button class="btn ghost" id="rsBatch">Research all with sites</button>' +
+      '</div>' +
+      '<p class="muted" style="font-size:12.5px;margin:10px 0 0">One page per request, ten second timeout, no crawling. Private and LAN addresses are refused. Research never sends anything.</p>' +
+    '</div></div>' +
+    '<div id="rsOut"></div>';
+
+  $('#rsGo').onclick = () => rsResearch($('#rsUrl').value.trim());
+  $('#rsUrl').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); rsResearch($('#rsUrl').value.trim()); }
+  });
+  $('#rsBatch').onclick = rsBatchResearch;
+  state.rs = state.rs || null;
+  if (state.rs) rsRender();
+  else $('#rsOut').innerHTML = '<div class="panel"><div class="empty">Enter a domain to see what the business actually does.</div></div>';
+  rsStatus();
+}
+
+async function rsStatus() {
+  const host = $('#rsStatus');
+  if (!host) return;
+  try {
+    const s = await api('/api/research/status');
+    const m = s.llm || {};
+    const live = m.configured && m.reachable;
+    const model = live
+      ? '<span class="pill ok"><span class="dot"></span>' + esc(m.model || 'model') + (m.latency_ms != null ? ' ' + m.latency_ms + 'ms' : '') + '</span>'
+      : '<span class="pill warn"><span class="dot"></span>' + esc(m.configured ? 'model unreachable' : 'templates only') + '</span>';
+    host.innerHTML = model +
+      '<span class="pill info">' + nfmt(s.researched) + ' of ' + nfmt(s.businesses) + ' researched</span>';
+  } catch (err) {
+    host.innerHTML = '<span class="pill bad">status unavailable</span>';
+  }
+}
+
+async function rsResearch(url) {
+  if (!url) return toast('Paste a domain first', 'bad');
+  const out = $('#rsOut');
+  out.innerHTML = '<div class="panel"><div class="empty">Reading ' + esc(url) + ' ...</div></div>';
+  let d;
+  try {
+    d = await api('/api/research/domain', { method: 'POST', body: JSON.stringify({ url: url, deep: true }) });
+  } catch (err) {
+    out.innerHTML = '<div class="panel"><div class="empty">Could not read that site: ' + esc(err.message) + '</div></div>';
+    return toast(err.message, 'bad');
+  }
+  state.rs = { url: url, profile: d.profile || {}, brief: d.brief || '', businessId: d.business ? d.business.id : null, leads: null, filters: null };
+  rsRender();
+  const p = state.rs.profile;
+  if (p.error) toast('Read with a problem: ' + p.error, 'bad');
+  else toast(p.used_llm ? 'Read and structured by the model' : 'Read, structured from the page itself', 'ok');
+}
+
+function rsRender() {
+  const rs = state.rs || {};
+  const p = rs.profile || {};
+  const out = $('#rsOut');
+  if (!out) return;
+
+  const name = p.business_name || p.domain || rs.url || 'Site profile';
+  const images = '';
+  const services = (p.services || []).length
+    ? p.services.map((s) => '<span class="pill info">' + esc(s) + '</span>').join(' ')
+    : '<span class="muted">not listed on the page</span>';
+  const diffs = (p.differentiators || []).length
+    ? p.differentiators.map((s) => '<span class="pill">' + esc(s) + '</span>').join(' ')
+    : '<span class="muted">none found</span>';
+  const emails = (p.emails || []).length
+    ? p.emails.map((e) => '<div class="row" style="gap:6px"><span class="mono">' + esc(e) + '</span>' +
+        '<button class="btn ghost sm" data-save-email="' + esc(e) + '">Save as contact</button></div>').join('')
+    : '<span class="muted">none printed on the page</span>';
+  const phones = (p.phones || []).length ? p.phones.map((x) => esc(x)).join(' · ') : '<span class="muted">none</span>';
+  const pages = (p.pages || []).length
+    ? p.pages.map((u) => '<span class="pill">' + esc(String(u).replace(/^https?:\/\//, '')) + '</span>').join(' ')
+    : '<span class="muted">—</span>';
+
+  out.innerHTML =
+    '<div class="panel" style="margin-bottom:12px">' +
+      '<div class="panel-h"><div><h3 style="margin:0">' + esc(name) + '</h3>' +
+        '<div class="muted" style="font-size:12.5px">' + esc(p.domain || rs.url || '') + '</div></div>' +
+        '<div class="row">' + (p.used_llm ? '<span class="pill ok">model structured</span>' : '<span class="pill warn">page only</span>') +
+        (p.error ? '<span class="pill bad">' + esc(p.error) + '</span>' : '') + '</div></div>' +
+      '<div class="panel-b">' +
+        '<p style="margin:0 0 12px"><span class="strong">What they do: </span>' + esc(p.what_they_do || p.meta_description || '—') + '</p>' +
+        '<div class="form-grid">' +
+          '<div class="field"><label>Service area</label><div>' + esc(p.service_area || (p.places || []).join(', ') || '—') + '</div></div>' +
+          '<div class="field"><label>Industry guess</label><div>' + esc(p.industry || '—') + '</div></div>' +
+          '<div class="field"><label>Who they sell to</label><div>' + esc(p.customers || '—') + '</div></div>' +
+          '<div class="field"><label>Phones</label><div>' + phones + '</div></div>' +
+        '</div>' +
+        '<div style="margin-top:14px"><div class="muted" style="font-size:12px;margin-bottom:6px">Services</div>' +
+          '<div class="row" style="flex-wrap:wrap;gap:6px">' + services + '</div></div>' +
+        '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">Differentiators</div>' +
+          '<div class="row" style="flex-wrap:wrap;gap:6px">' + diffs + '</div></div>' +
+        '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">Hook worth citing</div>' +
+          '<div>' + esc(p.talking_point || '—') + '</div></div>' +
+        '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">Emails on the page</div>' + emails + '</div>' +
+        '<div style="margin-top:12px"><div class="muted" style="font-size:12px;margin-bottom:6px">Pages read</div>' +
+          '<div class="row" style="flex-wrap:wrap;gap:6px">' + pages + '</div></div>' +
+      '</div>' +
+      '<div class="action-bar">' +
+        (rs.businessId
+          ? '<span class="pill ok">saved as lead</span>'
+          : '<button class="btn ghost sm" id="rsImport">Save as lead</button>') +
+        '<button class="btn ghost sm" id="rsFind">Find matching leads</button>' +
+        '<button class="btn sm" id="rsDraft"' + (rs.businessId ? '' : ' disabled title="Save it as a lead first"') + '>Draft email</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="rsLeadsOut"></div>';
+
+  if ($('#rsImport')) $('#rsImport').onclick = rsImport;
+  $('#rsFind').onclick = rsFindLeads;
+  $('#rsDraft').onclick = () => rsDraft(rs.businessId);
+  out.querySelectorAll('button[data-save-email]').forEach((b) => {
+    b.onclick = () => rsSaveContact(b.dataset.saveEmail);
+  });
+  if (rs.leads) rsRenderLeads();
+}
+
+async function rsImport() {
+  const rs = state.rs || {};
+  const p = rs.profile || {};
+  if (!p.business_name && !p.domain) return toast('Nothing to save: no company name on the page', 'bad');
+  try {
+    const d = await api('/api/research/import', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: state.ws, profile: p }),
+    });
+    rs.businessId = d.business ? d.business.id : null;
+    rsRender();
+    toast(d.created ? 'Saved as a lead' : 'Matched an existing lead on this domain', 'ok');
+    if (d.contact_email) toast('Email saved unverified: ' + d.contact_email, '');
+  } catch (err) { toast(err.message, 'bad'); }
+}
+
+async function rsSaveContact(email) {
+  const rs = state.rs || {};
+  if (!rs.businessId) return toast('Save the business as a lead first', 'bad');
+  try {
+    const d = await api('/api/research/contact', {
+      method: 'POST',
+      body: JSON.stringify({ business_id: rs.businessId, email: email }),
+    });
+    toast(d.created ? 'Contact saved unverified' : 'Already saved', 'ok');
+  } catch (err) { toast(err.message, 'bad'); }
+}
+
+async function rsFindLeads() {
+  const rs = state.rs || {};
+  const host = $('#rsLeadsOut');
+  if (!host) return;
+  host.innerHTML = '<div class="panel"><div class="empty">Looking for the same trade in the same area ...</div></div>';
+  try {
+    const d = await api('/api/research/leads', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: state.ws, url: rs.url, limit: 25 }),
+    });
+    rs.leads = d.results || [];
+    rs.filters = d.filters || null;
+    rs.hint = d.hint || null;
+    rsRenderLeads();
+    toast(d.count + ' lead' + (d.count === 1 ? '' : 's') + ' matched', d.count ? 'ok' : '');
+  } catch (err) {
+    host.innerHTML = '<div class="panel"><div class="empty">' + esc(err.message) + '</div></div>';
+    toast(err.message, 'bad');
+  }
+}
+
+function rsRenderLeads() {
+  const rs = state.rs || {};
+  const host = $('#rsLeadsOut');
+  if (!host) return;
+  const f = rs.filters || {};
+  const head = '<div class="panel-h"><div><h3 style="margin:0">Matching leads</h3>' +
+    '<div class="muted" style="font-size:12.5px">' +
+      esc([f.category, f.city, f.state].filter(Boolean).join(' · ') || 'no filters') + '</div></div>' +
+    '<div class="row"><span class="muted">' + nfmt((rs.leads || []).length) + '</span></div></div>';
+  if (!(rs.leads || []).length) {
+    host.innerHTML = '<div class="panel">' + head + '<div class="empty">' +
+      esc(rs.hint || 'Nothing matched. Import a lead list for this area.') + '</div></div>';
+    return;
+  }
+  host.innerHTML = '<div class="panel">' + head +
+    '<table><thead><tr><th>Business</th><th>Category</th><th>Contact</th><th>Fit</th><th></th></tr></thead><tbody>' +
+    rs.leads.map((b) => {
+      const fit = b.fit_score;
+      const cls = fit == null ? 'lo' : fit >= 70 ? 'hi' : fit >= 45 ? 'mid' : 'lo';
+      const email = b.email
+        ? '<div class="mono">' + esc(b.email) + '</div><span class="pill ' + (b.email_status === 'verified' ? 'ok' : 'info') + '">' + esc(b.email_status || 'unknown') + '</span>'
+        : '<span class="muted">no email</span>';
+      const meta = [b.city, b.state].filter(Boolean).join(', ') || '—';
+      const canDraft = b.email ? '' : ' disabled';
+      return '<tr><td><div class="strong">' + esc(b.name) + '</div>' +
+          '<div class="muted" style="font-size:12px">' + esc(meta) + (b.researched ? ' · researched' : '') + '</div></td>' +
+        '<td class="muted">' + esc(b.category || '—') + '</td>' +
+        '<td>' + email + '</td>' +
+        '<td><span class="fit ' + cls + '">' + (fit == null ? '—' : fit) + '</span></td>' +
+        '<td><button class="btn ghost sm" data-draft="' + esc(b.id) + '"' + canDraft + '>Draft</button></td></tr>';
+    }).join('') + '</tbody></table></div>';
+  host.querySelectorAll('button[data-draft]').forEach((btn) => {
+    btn.onclick = () => rsDraft(btn.dataset.draft);
+  });
+}
+
+async function rsDraft(businessId) {
+  if (!businessId) return toast('Save the business as a lead first', 'bad');
+  openModal('Drafting', '<div class="empty">Reading the site and writing the email ...</div>');
+  let d;
+  try {
+    d = await api('/api/research/email', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: state.ws, business_id: businessId, length: 100 }),
+    });
+  } catch (err) {
+    closeModal();
+    toast(err.message, 'bad');
+    if (/AI profile/i.test(err.message)) {
+      toast('Open Voice and create the sending profile, then try again', '');
+    }
+    return;
+  }
+  const pill = (txt, kind) => '<span class="pill ' + kind + '">' + esc(txt) + '</span>';
+  const facts = [
+    d.used_llm ? pill('model written', 'ok') : pill('template', 'warn'),
+    d.grounded ? pill('grounded in their site', 'ok') : pill('no site evidence', 'bad'),
+    pill(d.word_count + ' words', 'info'),
+  ].join(' ');
+  const who = d.contact_name ? d.contact_name + ' <' + (d.contact_email || '') + '>'
+    : (d.contact_email ? d.contact_email : 'no contact on file');
+  openModal('Email for ' + (d.business_name || 'this lead'),
+    '<div class="field" style="margin-bottom:10px"><label>To</label><div>' + esc(who) + '</div></div>' +
+    '<div class="field" style="margin-bottom:10px"><label>Subject</label>' +
+      '<input id="rsSubject" value="' + esc(d.subject || '') + '"></div>' +
+    '<div class="field" style="margin-bottom:10px"><label>Body</label>' +
+      '<textarea id="rsBody" rows="14" style="width:100%;font-family:inherit">' + esc(d.body || '') + '</textarea></div>' +
+    (d.evidence ? '<p class="muted" style="font-size:12.5px">Citing: ' + esc(d.evidence) + '</p>' : '') +
+    (d.research_error ? '<p class="muted" style="font-size:12.5px">Research problem: ' + esc(d.research_error) + '</p>' : '') +
+    (d.email_ready ? '' : '<p class="muted" style="font-size:12.5px">The address is not verified, so the send gate will skip this lead until it is.</p>'),
+    '<div class="row">' + facts + '<div class="spacer"></div>' +
+      '<button class="btn ghost sm" id="rsCopy">Copy</button>' +
+      '<button class="btn sm" id="rsClose">Done</button></div>');
+  $('#rsClose').onclick = closeModal;
+  $('#rsCopy').onclick = async () => {
+    const text = 'Subject: ' + $('#rsSubject').value + '\n\n' + $('#rsBody').value;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Copied', 'ok');
+    } catch (err) {
+      $('#rsBody').select();
+      toast('Press ctrl+c to copy', '');
+    }
+  };
+}
+
+async function rsBatchResearch() {
+  try {
+    const d = await api('/api/research/batch', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: state.ws, limit: 5 }),
+    });
+    toast('Researched ' + (d.researched || 0) + ' of ' + (d.considered || 0) + ' sites', (d.researched ? 'ok' : ''));
+    if (!state.rs) rsStatus();
+  } catch (err) { toast(err.message, 'bad'); }
+}
 
 /* ---------------- sequences ---------------- */
 async function viewSequences(v) {

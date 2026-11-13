@@ -53,6 +53,10 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("enrollments", "claimed_at", "TEXT"),
     ("enrollments", "claimed_by", "TEXT"),
     ("workspaces", "timezone", "TEXT"),
+    # site research is cached on the business row: one fetch serves every email,
+    # and a site that later goes offline cannot break an in-flight sequence.
+    ("businesses", "site_research", "TEXT"),
+    ("businesses", "researched_at", "TEXT"),
 ]
 
 

@@ -18,7 +18,16 @@ import logging
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import config, logging_setup, routes_ai, routes_campaigns, routes_data, routes_ui, routes_webhooks
+from . import (
+    config,
+    logging_setup,
+    routes_ai,
+    routes_campaigns,
+    routes_data,
+    routes_research,
+    routes_ui,
+    routes_webhooks,
+)
 from .db import healthcheck, init_db
 from .security import RateLimiter, require_token
 
@@ -46,6 +55,7 @@ _auth = [Depends(require_token)]
 app.include_router(routes_data.router, dependencies=_auth)
 app.include_router(routes_campaigns.router, dependencies=_auth)
 app.include_router(routes_ai.router, dependencies=_auth)
+app.include_router(routes_research.router, dependencies=_auth)
 app.include_router(routes_ui.router, dependencies=_auth)
 # Public surface: the dashboard shell, signed-token opt-out, then HMAC-verified webhooks.
 app.include_router(routes_ui.public)

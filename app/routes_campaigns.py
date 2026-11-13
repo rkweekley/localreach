@@ -217,7 +217,21 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
             body_tpl = step["body_template"] or ""
             snippet_text = None
             if "{{ai_snippet}}" in body_tpl:
-                gen = ai.generate_snippet(dict(profile) if profile else {}, dict(biz), dict(contact))
+                # Cite the prospect's own website when we have researched it.
+                # This is the difference between "you're a roofer in Columbus"
+                # and something a human can tell was written for them, and it
+                # costs nothing at send time because the profile is cached.
+                observed = ""
+                try:
+                    from . import research as _research
+
+                    stored = biz["site_research"] if "site_research" in biz.keys() else None
+                    observed = _research.brief(stored)
+                except Exception:  # noqa: BLE001 - a bad cache must never stop a send
+                    observed = ""
+                gen = ai.generate_snippet(
+                    dict(profile) if profile else {}, dict(biz), dict(contact), detail=observed
+                )
                 snippet_text = gen["text"]
                 body_tpl = body_tpl.replace("{{ai_snippet}}", snippet_text)
 
