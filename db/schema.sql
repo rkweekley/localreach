@@ -225,6 +225,29 @@ CREATE TABLE IF NOT EXISTS category_demand (
   PRIMARY KEY (category, state, city)
 );
 
+-- Hermes research queue. The operator types a domain in the dashboard and the
+-- row lands here; the Hermes agent worker (scripts/hermes_worker.py) claims it,
+-- researches the site with its own tools, and posts the lead + draft back.
+-- This is how the UI uses the agent without exposing an agent endpoint to the
+-- internet: the worker pulls, it never gets called.
+CREATE TABLE IF NOT EXISTS research_queue (
+  id            TEXT PRIMARY KEY,
+  workspace_id  TEXT NOT NULL REFERENCES workspaces(id),
+  domain        TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'pending',  -- pending | claimed | done | error
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  business_id   TEXT REFERENCES businesses(id),
+  profile       TEXT,                  -- JSON research payload from the worker
+  draft         TEXT,                  -- JSON {subject, body, grounded_on}
+  error         TEXT,
+  requested_by  TEXT,
+  requested_at  TEXT NOT NULL,
+  claimed_at    TEXT,
+  finished_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_rq_pending ON research_queue (status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_rq_ws ON research_queue (workspace_id, requested_at);
+
 -- Search-task queue: steps whose channel is 'call'/'linkedin' land here instead
 -- of being sent by email. This is what turns unreachable leads into work.
 CREATE TABLE IF NOT EXISTS tasks (

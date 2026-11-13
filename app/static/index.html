@@ -595,13 +595,15 @@ async function viewResearch(v) {
         '<div class="field" style="flex:1;min-width:240px"><label>Prospect domain</label>' +
           '<input id="rsUrl" placeholder="buckeyeridgeroofing.com" autocomplete="off" spellcheck="false"></div>' +
         '<button class="btn" id="rsGo">Research site</button>' +
+        '<button class="btn ghost" id="rsAgent" title="Queues the domain for the Hermes agent, which reads the site with its own tools">Research with the agent</button>' +
         '<button class="btn ghost" id="rsBatch">Research all with sites</button>' +
       '</div>' +
-      '<p class="muted" style="font-size:12.5px;margin:10px 0 0">One page per request, ten second timeout, no crawling. Private and LAN addresses are refused. Research never sends anything.</p>' +
+      '<p class="muted" style="font-size:12.5px;margin:10px 0 0">One page per request, ten second timeout, no crawling. Private and LAN addresses are refused. Research never sends anything. The agent path queues the domain and picks it up within a minute.</p>' +
     '</div></div>' +
     '<div id="rsOut"></div>';
 
   $('#rsGo').onclick = () => rsResearch($('#rsUrl').value.trim());
+  $('#rsAgent').onclick = () => rsAgentResearch($('#rsUrl').value.trim());
   $('#rsUrl').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); rsResearch($('#rsUrl').value.trim()); }
   });
@@ -645,6 +647,86 @@ async function rsResearch(url) {
   const p = state.rs.profile;
   if (p.error) toast('Read with a problem: ' + p.error, 'bad');
   else toast(p.used_llm ? 'Read and structured by the model' : 'Read, structured from the page itself', 'ok');
+}
+
+async function rsAgentResearch(url) {
+  if (!url) return toast('Paste a domain first', 'bad');
+  const out = $('#rsOut');
+  let item;
+  try {
+    const d = await api('/api/research/queue', {
+      method: 'POST',
+      body: JSON.stringify({ workspace_id: state.ws, url: url }),
+    });
+    item = d.item;
+    if (d.duplicate) toast('That domain was already queued', '');
+  } catch (err) {
+    out.innerHTML = '<div class="panel"><div class="empty">' + esc(err.message) + '</div></div>';
+    return toast(err.message, 'bad');
+  }
+  const started = Date.now();
+  const wait = (row, secs) => {
+    const what = row && row.status === 'claimed' ? 'The agent is reading' : 'Queued for the agent:';
+    out.innerHTML = '<div class="panel"><div class="empty">' + esc(what) + ' ' + esc(url) +
+      ' <span class="muted">(' + secs + 's)</span></div></div>';
+  };
+  wait(item, 0);
+  const tick = async () => {
+    let row = null;
+    try {
+      const list = await api('/api/research/queue?workspace_id=' + encodeURIComponent(state.ws));
+      row = (list.items || []).find((i) => i.id === item.id) || null;
+    } catch (err) { /* transient; keep waiting */ }
+    if (!row) { setTimeout(tick, 4000); return; }
+    const secs = Math.round((Date.now() - started) / 1000);
+    if (row.status === 'pending' || row.status === 'claimed') {
+      wait(row, secs);
+      if (secs > 480) {
+        out.innerHTML = '<div class="panel"><div class="empty">Still queued after ' + secs +
+          's. The worker may not be running - it is <span class="mono">scripts/hermes_worker.py</span>.</div></div>';
+        return;
+      }
+      setTimeout(tick, 3000);
+      return;
+    }
+    if (row.status === 'error') {
+      out.innerHTML = '<div class="panel"><div class="empty">The agent could not finish: ' +
+        esc(row.error || 'unknown error') + '</div></div>';
+      return toast('Agent failed: ' + (row.error || 'unknown'), 'bad');
+    }
+    const p = row.profile || {};
+    state.rs = { url: p.url || row.url || url, profile: p, brief: '', businessId: row.business_id || null, leads: null, filters: null };
+    rsRender();
+    toast('The agent researched it' + (row.draft ? ' and wrote a draft' : ''), 'ok');
+    if (row.draft) rsShowAgentDraft(row.draft, p);
+  };
+  tick();
+}
+
+function rsShowAgentDraft(draft, profile) {
+  const pill = (txt, kind) => '<span class="pill ' + kind + '">' + esc(txt) + '</span>';
+  const words = String(draft.body || '').trim().split(/\s+/).filter(Boolean).length;
+  openModal('Draft for ' + (profile.business_name || 'this lead'),
+    '<div class="field" style="margin-bottom:10px"><label>Subject</label>' +
+      '<input id="rsSubject" value="' + esc(draft.subject || '') + '"></div>' +
+    '<div class="field" style="margin-bottom:10px"><label>Body</label>' +
+      '<textarea id="rsBody" rows="14" style="width:100%;font-family:inherit">' + esc(draft.body || '') + '</textarea></div>' +
+    (draft.grounded_on ? '<p class="muted" style="font-size:12.5px">Citing: ' + esc(draft.grounded_on) + '</p>' : '') +
+    '<p class="muted" style="font-size:12.5px">Written by the agent. The contact is unverified, so the send gate will skip this lead until someone verifies it.</p>',
+    '<div class="row">' + pill('agent written', 'ok') + pill(words + ' words', 'info') + '<div class="spacer"></div>' +
+      '<button class="btn ghost sm" id="rsCopy">Copy</button>' +
+      '<button class="btn sm" id="rsClose">Done</button></div>');
+  $('#rsClose').onclick = closeModal;
+  $('#rsCopy').onclick = async () => {
+    const text = 'Subject: ' + $('#rsSubject').value + '\n\n' + $('#rsBody').value;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Copied', 'ok');
+    } catch (err) {
+      $('#rsBody').select();
+      toast('Press ctrl+c to copy', '');
+    }
+  };
 }
 
 function rsRender() {

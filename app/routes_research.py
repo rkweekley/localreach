@@ -476,6 +476,116 @@ class ImportIn(BaseModel):
     state: str | None = None
 
 
+def _upsert_lead(
+    conn,
+    workspace_id: str,
+    profile: dict,
+    category: str | None = None,
+    city: str | None = None,
+    state: str | None = None,
+) -> dict:
+    """Create or refresh the lead row for a researched site.
+
+    Shared by the synchronous import endpoint and the Hermes queue worker so both
+    paths dedupe on domain and both land the contact unverified. Nothing here
+    decides whether an email may be sent - that stays with the send gate.
+    """
+    p = profile or {}
+    domain = (p.get("domain") or "").strip().lower()
+    name = (p.get("business_name") or p.get("name") or domain or "").strip()
+    if not name:
+        raise HTTPException(422, "Nothing to import - the profile has no company name")
+
+    area = [x.strip() for x in str(p.get("service_area") or "").split(",") if x.strip()]
+    city = city or (area[0] if len(area) > 1 else None)
+    state = state or (area[-1].upper() if len(area) > 1 and len(area[-1]) == 2 else None)
+    emails = [e for e in (p.get("emails") or []) if isinstance(e, str) and "@" in e]
+    phones = [x for x in (p.get("phones") or []) if isinstance(x, str)]
+
+    if not conn.execute("SELECT 1 FROM workspaces WHERE id = ?", (workspace_id,)).fetchone():
+        raise HTTPException(404, "workspace not found")
+
+    existing = None
+    if domain:
+        existing = conn.execute("SELECT id FROM businesses WHERE domain = ?", (domain,)).fetchone()
+
+    if existing:
+        bid = existing["id"]
+        conn.execute(
+            """UPDATE businesses
+                  SET name = CASE WHEN COALESCE(name, '') = '' THEN ? ELSE name END,
+                      category = COALESCE(NULLIF(category, ''), ?),
+                      city = COALESCE(NULLIF(city, ''), ?),
+                      state = COALESCE(NULLIF(state, ''), ?),
+                      website = COALESCE(NULLIF(website, ''), ?),
+                      phone = COALESCE(NULLIF(phone, ''), ?),
+                      site_research = ?, researched_at = ?, updated_at = ?
+                WHERE id = ?""",
+            (name, category or p.get("industry"), city, state, p.get("url"),
+             (phones or [None])[0], json.dumps(p), utcnow(), utcnow(), bid),
+        )
+        created = False
+    else:
+        bid = new_id()
+        conn.execute(
+            """INSERT INTO businesses (id, name, category, city, state, phone, website, domain,
+                                       source, source_ref, fetched_at, site_research, researched_at,
+                                       created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (bid, name, category or p.get("industry"), city, state, (phones or [None])[0],
+             p.get("url"), domain, "research", domain or name, utcnow(),
+             json.dumps(p), utcnow(), utcnow(), utcnow()),
+        )
+        created = True
+
+    lst = conn.execute(
+        "SELECT id FROM lists WHERE workspace_id = ? AND name = 'Researched'",
+        (workspace_id,),
+    ).fetchone()
+    if lst:
+        lid = lst["id"]
+    else:
+        lid = new_id()
+        conn.execute(
+            "INSERT INTO lists (id, workspace_id, name, created_at) VALUES (?,?,?,?)",
+            (lid, workspace_id, "Researched", utcnow()),
+        )
+    conn.execute(
+        "INSERT OR IGNORE INTO list_members (list_id, business_id, added_at) VALUES (?,?,?)",
+        (lid, bid, utcnow()),
+    )
+
+    # An address printed on their own site is a lead, not proof the mailbox
+    # exists - it lands unverified and the send gate keeps it out of a
+    # sequence until somebody checks it.
+    saved_email = None
+    for candidate in emails[:1]:
+        email = candidate.strip().lower()
+        if conn.execute("SELECT 1 FROM contacts WHERE email = ?", (email,)).fetchone():
+            saved_email = email
+            continue
+        has_primary = conn.execute(
+            "SELECT 1 FROM contacts WHERE business_id = ? AND is_primary = 1", (bid,)
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO contacts (id, business_id, full_name, title, email, email_status,
+                                      email_source, verified_at, is_primary, created_at)
+               VALUES (?,?,?,?,?, 'unverified', 'website', NULL, ?, ?)""",
+            (new_id(), bid, None, None, email, 0 if has_primary else 1, utcnow()),
+        )
+        saved_email = email
+
+    return {"created": created, "business_id": bid, "list_id": lid, "contact_email": saved_email}
+
+
+class ImportIn(BaseModel):
+    workspace_id: str
+    profile: dict[str, Any]
+    category: str | None = None
+    city: str | None = None
+    state: str | None = None
+
+
 @router.post("/research/import")
 def import_researched(body: ImportIn) -> dict:
     """Turn a researched site into a real lead in this workspace.
@@ -484,102 +594,195 @@ def import_researched(body: ImportIn) -> dict:
     row instead of creating a twin. The seed joins the workspace "Researched"
     list so it appears under Leads and can be sequenced like any other lead.
     """
-    p = body.profile or {}
-    domain = (p.get("domain") or "").strip().lower()
-    name = (p.get("business_name") or p.get("name") or domain or "").strip()
-    if not name:
-        raise HTTPException(422, "Nothing to import - the profile has no company name")
+    conn = connect()
+    try:
+        result = _upsert_lead(conn, body.workspace_id, body.profile, body.category, body.city, body.state)
+        conn.commit()
+        row = dict(conn.execute("SELECT * FROM businesses WHERE id = ?", (result["business_id"],)).fetchone())
+    finally:
+        conn.close()
 
-    area = [x.strip() for x in str(p.get("service_area") or "").split(",") if x.strip()]
-    city = body.city or (area[0] if len(area) > 1 else None)
-    state = body.state or (area[-1].upper() if len(area) > 1 and len(area[-1]) == 2 else None)
-    emails = [e for e in (p.get("emails") or []) if isinstance(e, str) and "@" in e]
-    phones = [x for x in (p.get("phones") or []) if isinstance(x, str)]
+    return {
+        "created": result["created"],
+        "business": row,
+        "list_id": result["list_id"],
+        "contact_email": result["contact_email"],
+        "note": "Saved unverified - verify the address before it can send.",
+    }
+
+
+# ------------------------------------------------------- Hermes research queue
+#
+# The dashboard never calls an agent directly. It enqueues a domain; the Hermes
+# worker (scripts/hermes_worker.py) pulls the row, researches the site with its
+# own tools, and posts the lead plus a grounded draft back here. Pull, not push,
+# so no agent endpoint has to be exposed to the internet and a box that reboots
+# simply resumes on the next poll.
+
+_QUEUE_OPEN = ("pending", "claimed")
+
+
+class QueueIn(BaseModel):
+    workspace_id: str
+    url: str
+    requested_by: str | None = None
+
+
+class ClaimIn(BaseModel):
+    workspace_id: str | None = None
+    limit: int = 1
+
+
+class CompleteIn(BaseModel):
+    status: str = "done"  # done | error
+    profile: dict[str, Any] | None = None
+    draft: dict[str, Any] | None = None
+    error: str | None = None
+
+
+def _queue_item(row: Any) -> dict:
+    data = dict(row)
+    for key in ("profile", "draft"):
+        raw = data.get(key)
+        if raw:
+            try:
+                data[key] = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                data[key] = None
+    return data
+
+
+@router.post("/research/queue")
+def enqueue_research(body: QueueIn, request: Request) -> dict:
+    """Hand a domain to the Hermes agent. Idempotent while an item is open."""
+    _throttle(request)
+    try:
+        _url, domain = research.normalize_url(body.url)
+    except research.ResearchError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     conn = connect()
     try:
         if not conn.execute("SELECT 1 FROM workspaces WHERE id = ?", (body.workspace_id,)).fetchone():
             raise HTTPException(404, "workspace not found")
-
-        existing = None
-        if domain:
-            existing = conn.execute("SELECT id FROM businesses WHERE domain = ?", (domain,)).fetchone()
-
-        if existing:
-            bid = existing["id"]
-            conn.execute(
-                """UPDATE businesses
-                      SET name = CASE WHEN COALESCE(name, '') = '' THEN ? ELSE name END,
-                          category = COALESCE(NULLIF(category, ''), ?),
-                          city = COALESCE(NULLIF(city, ''), ?),
-                          state = COALESCE(NULLIF(state, ''), ?),
-                          website = COALESCE(NULLIF(website, ''), ?),
-                          phone = COALESCE(NULLIF(phone, ''), ?),
-                          site_research = ?, researched_at = ?, updated_at = ?
-                    WHERE id = ?""",
-                (name, body.category or p.get("industry"), city, state, p.get("url"),
-                 (phones or [None])[0], json.dumps(p), utcnow(), utcnow(), bid),
-            )
-            created = False
-        else:
-            bid = new_id()
-            conn.execute(
-                """INSERT INTO businesses (id, name, category, city, state, phone, website, domain,
-                                           source, source_ref, fetched_at, site_research, researched_at,
-                                           created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (bid, name, body.category or p.get("industry"), city, state, (phones or [None])[0],
-                 p.get("url"), domain, "research", domain or name, utcnow(),
-                 json.dumps(p), utcnow(), utcnow(), utcnow()),
-            )
-            created = True
-
-        lst = conn.execute(
-            "SELECT id FROM lists WHERE workspace_id = ? AND name = 'Researched'",
-            (body.workspace_id,),
+        open_row = conn.execute(
+            "SELECT * FROM research_queue WHERE workspace_id = ? AND domain = ?"
+            " AND status IN ('pending','claimed') ORDER BY requested_at DESC LIMIT 1",
+            (body.workspace_id, domain),
         ).fetchone()
-        if lst:
-            lid = lst["id"]
-        else:
-            lid = new_id()
-            conn.execute(
-                "INSERT INTO lists (id, workspace_id, name, created_at) VALUES (?,?,?,?)",
-                (lid, body.workspace_id, "Researched", utcnow()),
-            )
+        if open_row:
+            return {
+                "duplicate": True,
+                "item": _queue_item(open_row),
+                "note": "Already queued - the agent will pick it up.",
+            }
+        qid = new_id()
         conn.execute(
-            "INSERT OR IGNORE INTO list_members (list_id, business_id, added_at) VALUES (?,?,?)",
-            (lid, bid, utcnow()),
+            "INSERT INTO research_queue (id, workspace_id, domain, status, requested_by, requested_at)"
+            " VALUES (?,?,?, 'pending', ?, ?)",
+            (qid, body.workspace_id, domain, body.requested_by, utcnow()),
         )
-
-        # An address printed on their own site is a lead, not proof the mailbox
-        # exists - it lands unverified and the send gate keeps it out of a
-        # sequence until somebody checks it.
-        saved_email = None
-        for candidate in emails[:1]:
-            email = candidate.strip().lower()
-            if conn.execute("SELECT 1 FROM contacts WHERE email = ?", (email,)).fetchone():
-                saved_email = email
-                continue
-            has_primary = conn.execute(
-                "SELECT 1 FROM contacts WHERE business_id = ? AND is_primary = 1", (bid,)
-            ).fetchone()
-            conn.execute(
-                """INSERT INTO contacts (id, business_id, full_name, title, email, email_status,
-                                          email_source, verified_at, is_primary, created_at)
-                   VALUES (?,?,?,?,?, 'unverified', 'website', NULL, ?, ?)""",
-                (new_id(), bid, None, None, email, 0 if has_primary else 1, utcnow()),
-            )
-            saved_email = email
-
         conn.commit()
-        row = dict(conn.execute("SELECT * FROM businesses WHERE id = ?", (bid,)).fetchone())
+        row = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
     finally:
         conn.close()
+    return {"duplicate": False, "item": _queue_item(row), "note": "Queued for the Hermes agent."}
 
+
+@router.get("/research/queue")
+def list_queue(workspace_id: str, limit: int = 25) -> dict:
+    conn = connect()
+    try:
+        fetched = conn.execute(
+            "SELECT * FROM research_queue WHERE workspace_id = ? ORDER BY requested_at DESC LIMIT ?",
+            (workspace_id, max(1, min(limit, 100))),
+        ).fetchall()
+    finally:
+        conn.close()
+    items = [_queue_item(r) for r in fetched]
     return {
-        "created": created,
-        "business": row,
-        "list_id": lid,
-        "contact_email": saved_email,
-        "note": "Saved unverified - verify the address before it can send.",
+        "items": items,
+        "pending": sum(1 for i in items if i["status"] in _QUEUE_OPEN),
+        "done": sum(1 for i in items if i["status"] == "done"),
     }
+
+
+@router.post("/research/queue/claim")
+def claim_queue(body: ClaimIn) -> dict:
+    """Worker side: take the oldest pending rows atomically (BEGIN IMMEDIATE)."""
+    limit = max(1, min(body.limit, 5))
+    conn = connect()
+    claimed: list[dict] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        sql = (
+            "SELECT * FROM research_queue WHERE status = 'pending'"
+            + (" AND workspace_id = ?" if body.workspace_id else "")
+            + " ORDER BY requested_at LIMIT ?"
+        )
+        args: tuple = ((body.workspace_id, limit) if body.workspace_id else (limit,))
+        picks = conn.execute(sql, args).fetchall()
+        now = utcnow()
+        for row in picks:
+            conn.execute(
+                "UPDATE research_queue SET status = 'claimed', claimed_at = ?,"
+                " attempts = attempts + 1 WHERE id = ?",
+                (now, row["id"]),
+            )
+            item = _queue_item(row)
+            item.update(
+                {
+                    "status": "claimed",
+                    "claimed_at": now,
+                    "attempts": (row["attempts"] or 0) + 1,
+                }
+            )
+            claimed.append(item)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"claimed": claimed, "count": len(claimed)}
+
+
+@router.post("/research/queue/{qid}/complete")
+def complete_queue(qid: str, body: CompleteIn) -> dict:
+    """Worker side: store the lead, the draft, or the failure reason."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "queue item not found")
+        if row["status"] == "done":
+            return {"ok": True, "already": True, "item": _queue_item(row)}
+
+        now = utcnow()
+        profile = body.profile or {}
+        if body.status == "done" and not (profile.get("business_name") or profile.get("name")):
+            conn.execute(
+                "UPDATE research_queue SET status = 'error',"
+                " error = 'the worker returned no company name', finished_at = ? WHERE id = ?",
+                (now, qid),
+            )
+        elif body.status == "done":
+            lead = _upsert_lead(conn, row["workspace_id"], profile)
+            conn.execute(
+                "UPDATE research_queue SET status = 'done', business_id = ?, profile = ?,"
+                " draft = ?, error = NULL, finished_at = ? WHERE id = ?",
+                (
+                    lead["business_id"],
+                    json.dumps(profile),
+                    json.dumps(body.draft) if body.draft else None,
+                    now,
+                    qid,
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE research_queue SET status = 'error', error = ?, finished_at = ? WHERE id = ?",
+                ((body.error or "worker reported an error")[:500], now, qid),
+            )
+        conn.commit()
+        row = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
+    finally:
+        conn.close()
+    return {"ok": True, "item": _queue_item(row)}
