@@ -66,7 +66,7 @@ done
 [[ "$status" == "healthy" ]] || { $COMPOSE logs --tail=40 localreach; die "container did not become healthy"; }
 
 say "smoke test from inside the container"
-docker exec localreach python - <<'PY'
+docker exec -i localreach python - <<'PY'
 import json, os, urllib.request
 base = "http://127.0.0.1:8000"
 h = urllib.request.urlopen(base + "/health", timeout=5)
