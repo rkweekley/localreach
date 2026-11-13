@@ -248,11 +248,11 @@ CREATE TABLE IF NOT EXISTS research_queue (
 CREATE INDEX IF NOT EXISTS idx_rq_pending ON research_queue (status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_rq_ws ON research_queue (workspace_id, requested_at);
 
--- Leads the agent discovered *for* a researched business. The researched domain
--- is the client (the seller); every row here is a company that buys what the
--- client sells, plus the signal that makes them worth contacting now. A lead is
--- only worth keeping if the signal was read somewhere real, so signal_source is
--- the URL the agent actually opened.
+-- Leads the agent discovered from a researched business. The researched domain is
+-- only an example of the type of business we sell to; every row here is another
+-- company of that same trade in the same market, plus the signal that makes them
+-- worth contacting now. A lead is only worth keeping if the signal was read
+-- somewhere real, so signal_source is the URL the agent actually opened.
 CREATE TABLE IF NOT EXISTS research_leads (
   id            TEXT PRIMARY KEY,
   queue_id      TEXT REFERENCES research_queue(id),
