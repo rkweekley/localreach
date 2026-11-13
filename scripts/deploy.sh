@@ -23,8 +23,8 @@ command -v docker >/dev/null || die "docker not found"
 docker info >/dev/null 2>&1 || die "Docker daemon is not running — open -a Docker and wait for it"
 
 say "checking shared proxy network"
-docker network inspect nginx-proxy-manager_default >/dev/null 2>&1 \
-  || die "network nginx-proxy-manager_default missing — start the NPM stack first"
+docker network inspect mac >/dev/null 2>&1 \
+  || die "network 'mac' missing — it is the shared network nginx-proxy-manager is attached to"
 
 if [[ ! -f .env ]]; then
   say "creating .env with fresh secrets"
