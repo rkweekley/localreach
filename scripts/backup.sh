@@ -17,15 +17,7 @@ OUT="backups/localreach-${STAMP}.db"
 mkdir -p backups
 chmod 700 backups
 
-docker exec localreach python - <<'PY'
-import sqlite3
-src = sqlite3.connect("/data/localreach.db")
-dst = sqlite3.connect("/data/backup.tmp")
-with dst:
-    src.backup(dst)
-dst.close()
-src.close()
-PY
+docker exec localreach python -c "import sqlite3; s=sqlite3.connect('/data/localreach.db'); d=sqlite3.connect('/data/backup.tmp'); s.backup(d); d.close(); s.close()"
 
 docker cp localreach:/data/backup.tmp "$OUT" >/dev/null
 docker exec localreach rm -f /data/backup.tmp
