@@ -209,7 +209,7 @@ def _completed_with_leads(ws, profile=None):
     return r.json()["item"]
 
 
-def test_agent_leads_are_saved_for_the_example_business(ws):
+def test_agent_leads_are_saved_for_the_client(ws):
     item = _completed_with_leads(ws)
     assert item["status"] == "done", item.get("error")
     profile = item["profile"]
@@ -236,14 +236,14 @@ def test_agent_leads_are_saved_for_the_example_business(ws):
         conn.close()
 
 
-def test_agent_leads_land_in_a_list_named_after_the_example(ws):
+def test_agent_leads_land_in_a_list_named_after_the_client(ws):
     item = _completed_with_leads(ws)
     list_id = item["profile"]["leads_list_id"]
     assert list_id
     conn = connect()
     try:
         lst = conn.execute("SELECT * FROM lists WHERE id = ?", (list_id,)).fetchone()
-        assert lst["name"] == "Leads like Buckeye Ridge Roofing"
+        assert lst["name"] == "Leads for Buckeye Ridge Roofing"
         n = conn.execute("SELECT COUNT(*) n FROM list_members WHERE list_id = ?", (list_id,)).fetchone()["n"]
         assert n == 2
     finally:
@@ -277,7 +277,7 @@ def test_agent_leads_are_readable_over_the_api(ws):
 
 
 def test_a_lead_without_a_site_still_dedupes_on_name(ws):
-    # Production runs repeat the same example; a lead with no domain of its own
+    # Production runs repeat the same client; a lead with no domain of its own
     # would otherwise be re-added every time and clutter the list.
     first = _completed_with_leads(ws)
     conn = connect()

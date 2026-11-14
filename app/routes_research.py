@@ -470,8 +470,7 @@ def research_status() -> dict:
 
 
 SIGNAL_KINDS = {
-    # "web" = weak or missing web presence: the signal that matters when we sell marketing.
-    "hiring", "permit", "expansion", "review", "rfp", "license", "news", "social", "web", "other",
+    "hiring", "permit", "expansion", "review", "rfp", "license", "news", "social", "other",
 }
 
 
@@ -490,14 +489,12 @@ def _store_research_leads(
     client_bid: str | None,
     profile: dict,
 ) -> dict:
-    """Save the companies of the same type that the agent found.
+    """Save the companies the agent found *for* the researched business.
 
-    The researched domain is only an EXAMPLE of the business type we sell to, so
-    every row here is a peer of that example: another company of the same trade in
-    the same market, with a reason to call them. Leads become real businesses so
-    they can be sequenced like any other lead, but no contact is created - the
-    agent is told never to invent an address, so a hint stays a hint until a human
-    checks it.
+    The researched site is the client here, not the target: every row is somebody
+    who buys what the client sells. Leads become real businesses so they can be
+    sequenced like any other lead, but no contact is created - the agent is told
+    never to invent an address, so a hint stays a hint until a human checks it.
     """
     found = [x for x in (profile.get("leads") or []) if isinstance(x, dict)]
     client = None
@@ -507,7 +504,7 @@ def _store_research_leads(
 
     lid = None
     if found:
-        list_name = f"Leads like {client_name}"[:120]
+        list_name = f"Leads for {client_name}"[:120]
         row = conn.execute(
             "SELECT id FROM lists WHERE workspace_id = ? AND name = ?", (workspace_id, list_name)
         ).fetchone()
@@ -528,7 +525,7 @@ def _store_research_leads(
             skipped += 1
             continue
         if domain and domain == _lead_domain((client["domain"] if client else "") or ""):
-            skipped += 1  # the example is not one of its own leads
+            skipped += 1  # the client is not its own lead
             continue
         if not str(lead.get("signal_source") or "").strip():
             skipped += 1  # unsourced signals are guesses, and guesses waste sends
