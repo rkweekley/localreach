@@ -44,7 +44,7 @@ BATCH = max(1, min(int(os.environ.get("BATCH", "1") or 1), 5))
 TIMEOUT = int(os.environ.get("AGENT_TIMEOUT_S", "840") or 840)
 DRY_RUN = (os.environ.get("DRY_RUN", "1") or "1").strip().lower() not in ("0", "false", "no", "off")
 
-PROMPT = """You are a lead researcher. Today's domain belongs to a BUSINESS WE WANT TO SELL TO, and that same business also needs customers of its own. Do two jobs in one turn: profile them, then find companies that should be buying from them right now.
+PROMPT = """You are a lead researcher. Today's domain belongs to a BUSINESS WE WANT TO SELL TO, and its own customers are what we are hunting. Do two jobs in one turn: profile the business, then find OTHER companies that could use the services this business sells right now. Those companies are its leads, and they are the whole point of the turn.
 
 Domain: {domain}
 
@@ -63,6 +63,7 @@ Then hunt for LEADS FOR THEM. A lead is a company that buys what this business s
 - COMPETITOR OVERFLOW: companies that publicly complain about a competitor or post a job that the competitor just lost.
 
 Rules for leads:
+- A lead is a company that would pay this business for the work it sells. Never return a competitor or another firm in the same trade: rivals are not leads.
 - Work fast: the whole turn must finish in about five minutes, so cap yourself at 8 lookups. If a lead's signal cannot be confirmed in one or two reads, drop it and move on.
 - Each lead must be a real company you found, with a domain where you can. Prefer 3 leads you actually verified over 8 you guessed.
 - Every lead needs a signal you READ, not inferred. Put the exact URL you read in signal_source. If you cannot source it, drop the lead.

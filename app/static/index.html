@@ -588,7 +588,7 @@ const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="
 /* ---------------- research ---------------- */
 async function viewResearch(v) {
   v.innerHTML =
-    '<div class="h"><div><h2>Research</h2><p>Paste a domain. This instance reads the site, learns what the business actually sells, finds matching local leads, then writes the email.</p></div>' +
+    '<div class="h"><div><h2>Research</h2><p>Paste the domain of a business you are finding customers for. The agent learns what that business sells, then hunts other companies in its market that could use those services right now, and writes the email.</p></div>' +
       '<div class="row" id="rsStatus"><span class="pill info">checking model</span></div></div>' +
     '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
       '<div class="row" style="align-items:flex-end;gap:8px">' +
@@ -733,7 +733,7 @@ function rsAgentLeadsHtml(p) {
   const leads = Array.isArray(p.leads) ? p.leads : null;
   if (!leads) return '';
   const head = '<div style="margin-top:16px"><div class="row" style="justify-content:space-between">' +
-    '<div class="muted" style="font-size:12px">Companies that should be buying from them</div>' +
+    '<div class="muted" style="font-size:12px">Companies that could use what they sell</div>' +
     '<span class="pill ' + (leads.length ? 'ok' : 'warn') + '">' + leads.length + ' found</span></div>';
   if (!leads.length) {
     return head + '<div class="muted" style="margin-top:6px">The agent read the site but sourced no buying signal this pass. ' +
