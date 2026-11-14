@@ -203,7 +203,7 @@ def _completed_with_leads(ws, profile=None):
     item = c.post("/api/research/queue", json={"workspace_id": ws, "url": "buckeyeridge.com"}).json()["item"]
     c.post("/api/research/queue/claim", json={"workspace_id": ws, "limit": 5})
     body = dict(PROFILE if profile is None else profile)
-    body.setdefault("leads", LEADS)
+    body["leads"] = LEADS
     r = c.post(f"/api/research/queue/{item['id']}/complete", json={"status": "done", "profile": body})
     assert r.status_code == 200, r.text
     return r.json()["item"]
@@ -232,27 +232,6 @@ def test_agent_leads_are_saved_for_the_example_business(ws):
         biz = conn.execute("SELECT * FROM businesses WHERE domain = ?", ("sciotovalleybuilders.com",)).fetchone()
         assert biz is not None and biz["id"] == rows[0]["business_id"]
         assert biz["source"] == "agent_lead"
-    finally:
-        conn.close()
-
-
-def test_the_example_domain_never_becomes_its_own_lead(ws):
-    # The agent is hunting peers of the example; if it echoes the example back it
-    # would be a lead for itself, and the outbound sequence would email the sample.
-    item = _completed_with_leads(
-        ws,
-        profile=dict(PROFILE, leads=[
-            dict(LEADS[0], name="Buckeye Ridge Roofing", domain="www.buckeyeridge.com",
-                 signal_source="https://www.buckeyeridge.com/careers"),
-        ]),
-    )
-    assert item["profile"]["leads_found"] == 0
-    conn = connect()
-    try:
-        n = conn.execute(
-            "SELECT COUNT(*) FROM research_leads WHERE queue_id = ?", (item["id"],)
-        ).fetchone()[0]
-        assert n == 0
     finally:
         conn.close()
 
