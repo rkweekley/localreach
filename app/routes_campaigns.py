@@ -103,11 +103,22 @@ def enroll(sequence_id: str, body: EnrollIn) -> dict:
             if not verdict and body.skip_blocked:
                 skipped.append({"business_id": bid, "reason": verdict.reason})
                 continue
+            # A researched lead can carry the agent's own first touch, written for
+            # this company about the signal we actually found. Enrolling it uses
+            # that instead of the sequence's generic step 1.
+            rl = conn.execute(
+                "SELECT email_subject, email_body FROM research_leads"
+                " WHERE business_id = ? AND COALESCE(email_subject, '') != ''"
+                " ORDER BY created_at DESC LIMIT 1",
+                (bid,),
+            ).fetchone()
             conn.execute(
                 """INSERT INTO enrollments (id,sequence_id,business_id,contact_id,status,current_step,
-                   next_send_at,created_at) VALUES (?,?,?,?,'active',0,?,?)
+                   next_send_at,created_at,override_subject,override_body)
+                   VALUES (?,?,?,?,'active',0,?,?,?,?)
                    ON CONFLICT (sequence_id, business_id) DO NOTHING""",
-                (new_id(), sequence_id, bid, contact["id"], utcnow(), utcnow()),
+                (new_id(), sequence_id, bid, contact["id"], utcnow(), utcnow(),
+                 rl["email_subject"] if rl else None, rl["email_body"] if rl else None),
             )
             enrolled.append(bid)
         conn.commit()
@@ -236,9 +247,23 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
                 body_tpl = body_tpl.replace("{{ai_snippet}}", snippet_text)
 
             body = render(body_tpl, ctx)
+            subject = render(step["subject_template"] or "", ctx)
+
+            # Step 1 for a researched lead: the agent already wrote this email for
+            # this exact company about the signal we found. Replaying the generic
+            # template over it would throw away the only reason we researched them.
+            override = conn.execute(
+                "SELECT override_subject, override_body FROM enrollments WHERE id = ?", (en["id"],)
+            ).fetchone()
+            if override and step["step_order"] == 1:
+                if (override["override_subject"] or "").strip():
+                    subject = override["override_subject"].strip()
+                if (override["override_body"] or "").strip():
+                    body = override["override_body"].strip()
+                    snippet_text = snippet_text or "lead-research"
+
             token = compliance.unsubscribe_token(workspace_id, contact["email"])
             body += compliance.footer(dict(ws), token)
-            subject = render(step["subject_template"] or "", ctx)
 
             unsub_url = f"{settings.public_base_url}/u/{token}"
             sent = mailer.send(

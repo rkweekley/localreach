@@ -754,12 +754,27 @@ function rsAgentLeadsHtml(p) {
         (l.signal_detail ? '<div class="muted" style="font-size:11.5px;margin-top:4px">' + esc(l.signal_detail) + '</div>' : '') +
       '</td>' +
       '<td style="font-size:12.5px">' + esc(l.why_now || '') + '<div style="margin-top:4px">' + src + '</div></td>' +
-      '<td><span class="fit ' + cls + '">' + (fit == null ? '—' : fit) + '</span></td></tr>';
+      '<td><span class="fit ' + cls + '">' + (fit == null ? '—' : fit) + '</span></td>' +
+      '<td style="font-size:12.5px;max-width:320px">' + rsLeadEmailCell(l) + '</td></tr>';
   }).join('');
-  return head + '<table style="margin-top:6px"><thead><tr><th>Company</th><th>Signal</th><th>Why now</th><th>Fit</th></tr></thead>' +
+  return head + '<table style="margin-top:6px"><thead><tr><th>Company</th><th>Signal</th><th>Why now</th><th>Fit</th><th>First touch</th></tr></thead>' +
     '<tbody>' + rows + '</tbody></table>' +
-    '<div class="muted" style="font-size:11.5px;margin-top:6px">Saved automatically. No email is invented here, ' +
+    '<div class="muted" style="font-size:11.5px;margin-top:6px">Saved automatically. The first touch is written for that company ' +
+      'about the signal above and goes out as step 1 instead of the template. No address is invented here, ' +
       'so verify a contact before anything can send.</div></div>';
+}
+
+function rsLeadEmailCell(l) {
+  const subj = String(l.email_subject || '').trim();
+  const body = String(l.email_body || '').trim();
+  if (!subj && !body) {
+    return '<span class="muted">no draft this pass</span>';
+  }
+  const copy = esc(JSON.stringify({ subject: subj, body: body }));
+  return '<div class="strong">' + esc(subj || '(no subject)') + '</div>' +
+    '<details style="margin-top:4px"><summary class="muted" style="font-size:11.5px;cursor:pointer">read it</summary>' +
+      '<div class="muted" style="font-size:12px;white-space:pre-wrap;margin-top:4px">' + esc(body) + '</div></details>' +
+    '<button class="btn ghost sm" style="margin-top:4px" data-copy-lead-email="' + copy + '">Copy</button>';
 }
 
 function rsRender() {
@@ -825,6 +840,17 @@ function rsRender() {
   $('#rsDraft').onclick = () => rsDraft(rs.businessId);
   out.querySelectorAll('button[data-save-email]').forEach((b) => {
     b.onclick = () => rsSaveContact(b.dataset.saveEmail);
+  });
+  out.querySelectorAll('button[data-copy-lead-email]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        const m = JSON.parse(b.dataset.copyLeadEmail || '{}');
+        await navigator.clipboard.writeText('Subject: ' + (m.subject || '') + '\n\n' + (m.body || ''));
+        toast('Copied the email');
+      } catch (e) {
+        toast('Copy failed — open it and select the text', 'warn');
+      }
+    };
   });
   if (rs.leads) rsRenderLeads();
 }

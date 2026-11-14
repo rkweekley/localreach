@@ -83,8 +83,17 @@ Rules for the profile:
 - The draft is an email to the researched business itself, offering what WE do: 60-90 words, first person, no "I hope this finds you well", no flattery, one concrete observation from their site, one sentence on what we do, one low-friction question. No em dashes. Sign as Ryan.
 - The subject is 6 words max, specific, no clickbait, no colon. Keep company and place names capitalized.
 
+Rules for the email on each lead — this is the part that gets sent:
+- Write `email` as if you work at the researched business, selling what it sells, to THAT lead. Not us to them: them to the lead.
+- Open with the signal you actually read, in the first sentence: the role they are hiring for, the permit, the expansion, the review. Quote one concrete detail so they know a person read it.
+- Then one sentence connecting that signal to what the researched business does. Then one low-friction question that a busy owner could answer in a line.
+- 50-90 words. Plain language. No em dashes, no "I hope this finds you well", no flattery, no "revolutionary", no exclamation marks.
+- Never invent a fact, a number, a project name, or a person. If you did not read it, do not write it. Never claim you worked with them before.
+- Sign as the researched business's own name, not as Ryan, because this is their email going out under their name.
+- Subject: 6 words max, about their signal, no colon, no clickbait, no "Quick question".
+
 Return ONLY this JSON object, no prose, no code fence:
-{{"profile": {{"business_name": "", "what_they_do": "", "industry": "", "customers": "", "service_area": "", "talking_point": "", "services": [], "differentiators": [], "emails": [], "phones": [], "icp": "", "buying_signals": [], "url": "https://{domain}", "domain": "{domain}"}}, "leads": [{{"name": "", "domain": "", "why_now": "", "signal_kind": "hiring|permit|expansion|review|rfp|license|news|social|other", "signal_detail": "", "signal_source": "https://...", "contact_hint": "", "fit": 80}}], "draft": {{"subject": "", "body": "", "grounded_on": ""}}}}"""
+{{"profile": {{"business_name": "", "what_they_do": "", "industry": "", "customers": "", "service_area": "", "talking_point": "", "services": [], "differentiators": [], "emails": [], "phones": [], "icp": "", "buying_signals": [], "url": "https://{domain}", "domain": "{domain}"}}, "leads": [{{"name": "", "domain": "", "why_now": "", "signal_kind": "hiring|permit|expansion|review|rfp|license|news|social|other", "signal_detail": "", "signal_source": "https://...", "contact_hint": "", "fit": 80, "email": {{"subject": "", "body": ""}}}}], "draft": {{"subject": "", "body": "", "grounded_on": ""}}}}"""
 
 
 def log(msg: str) -> None:

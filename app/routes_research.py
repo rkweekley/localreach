@@ -571,17 +571,29 @@ def _store_research_leads(
                 "AND COALESCE(domain, '') = '' AND lower(name) = lower(?)",
                 (client_bid, name),
             ).fetchone()
+        # The agent is asked to write the first touch for this specific company.
+        # Store it even if it is thin: a human reading a bad draft before sending
+        # costs nothing, and sending a generic one costs the domain's reputation.
+        email_obj = lead.get("email")
+        if not isinstance(email_obj, dict):
+            email_obj = {}
+        subject = str(email_obj.get("subject") or "").strip()[:180]
+        body = str(email_obj.get("body") or "").strip()[:4000]
+
         payload = (
             name, domain, str(lead.get("why_now") or "")[:600],
             kind, str(lead.get("signal_detail") or "")[:1200],
             str(lead.get("signal_source") or "")[:500],
             str(lead.get("contact_hint") or "")[:300], fit, bid,
+            subject or None, body or None,
         )
         if existing:
             conn.execute(
                 """UPDATE research_leads
                       SET name = ?, domain = ?, why_now = ?, signal_kind = ?, signal_detail = ?,
-                          signal_source = ?, contact_hint = ?, fit = ?, business_id = COALESCE(?, business_id)
+                          signal_source = ?, contact_hint = ?, fit = ?, business_id = COALESCE(?, business_id),
+                          email_subject = COALESCE(?, email_subject),
+                          email_body = COALESCE(?, email_body)
                     WHERE id = ?""",
                 payload + (existing["id"],),
             )
@@ -590,8 +602,9 @@ def _store_research_leads(
             conn.execute(
                 """INSERT INTO research_leads (name, domain, why_now, signal_kind, signal_detail,
                                                signal_source, contact_hint, fit, business_id,
+                                               email_subject, email_body,
                                                id, queue_id, workspace_id, client_business_id, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 payload + (new_id(), queue_id, workspace_id, client_bid, utcnow()),
             )
             created += 1

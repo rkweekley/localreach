@@ -64,6 +64,15 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # exact findings, so "we found a problem with their site" is checkable, not vibes.
     ("research_leads", "audit_score", "INTEGER"),
     ("research_leads", "audit_detail", "TEXT"),
+    # The agent writes a first-touch email for each specific lead, grounded in the
+    # signal it found. Kept on the lead row so a human can read it before anything
+    # is sent, and so the override survives re-enrollment.
+    ("research_leads", "email_subject", "TEXT"),
+    ("research_leads", "email_body", "TEXT"),
+    # Step 1 of a sequence is generic by construction. For a researched lead we
+    # swap in the email written for that company instead of the template.
+    ("enrollments", "override_subject", "TEXT"),
+    ("enrollments", "override_body", "TEXT"),
 ]
 
 
