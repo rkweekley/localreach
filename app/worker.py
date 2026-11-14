@@ -20,6 +20,7 @@ import time
 from . import config, logging_setup
 from .db import connect, init_db, rows
 from .routes_campaigns import tick
+from .routes_research import audit_pending, discover_pending
 
 log = logging.getLogger("localreach.worker")
 _running = True
@@ -61,6 +62,17 @@ def pass_once(limit: int) -> dict:
             log.exception("tick failed", extra={"extra_fields": {"workspace": wid}})
     if summary:
         log.info("worker pass", extra={"extra_fields": summary})
+    # Idle-time work: score a couple of prospect sites so "they have an open
+    # issue" is a checked fact by the time a human looks at the lead.
+    try:
+        audited = audit_pending(2)
+        if audited:
+            summary["audited"] = audited
+        found = discover_pending(1)
+        if found:
+            summary["contacts_found"] = found
+    except Exception:  # noqa: BLE001 - auditing must never stop sending
+        log.exception("audit pass failed")
     return summary
 
 

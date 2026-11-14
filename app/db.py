@@ -57,6 +57,13 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # and a site that later goes offline cannot break an in-flight sequence.
     ("businesses", "site_research", "TEXT"),
     ("businesses", "researched_at", "TEXT"),
+    # What the DNS check actually saw (mx hosts, spf/dmarc). Kept so a human can
+    # audit any "verified" claim after the fact instead of trusting a badge.
+    ("contacts", "verify_detail", "TEXT"),
+    # Deterministic site-gap audit of a prospect (see app/audit.py): score plus the
+    # exact findings, so "we found a problem with their site" is checkable, not vibes.
+    ("research_leads", "audit_score", "INTEGER"),
+    ("research_leads", "audit_detail", "TEXT"),
 ]
 
 

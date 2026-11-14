@@ -12,15 +12,18 @@ boundary, no build step.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from . import ai, research
+from . import ai, audit, discover, research, verify
 from .db import connect, new_id, rows, utcnow
 from .security import RateLimiter, client_ip
+
+log = logging.getLogger("localreach.research")
 
 router = APIRouter(prefix="/api", tags=["research"])
 
@@ -942,3 +945,285 @@ def list_research_leads(
     finally:
         conn.close()
     return {"items": items, "count": len(items)}
+
+
+# ---------------------------------------------------------------- verification
+
+class VerifyBatchIn(BaseModel):
+    """Verify the contacts attached to one research run.
+
+    `contact_ids` wins when given; otherwise every contact belonging to a lead
+    from that client (or that queue row) is checked. Nothing here sends mail —
+    it only decides whether the send gate will let an address through later.
+    """
+
+    contact_ids: list[str] | None = None
+    client_business_id: str | None = None
+    queue_id: str | None = None
+    limit: int = 50
+
+
+@router.post("/contacts/{contact_id}/verify")
+def verify_one_contact(contact_id: str) -> dict:
+    conn = connect()
+    try:
+        res = verify.verify_contact(conn, contact_id)
+        conn.commit()
+        if res.get("reason") == "not_found":
+            raise HTTPException(404, "contact not found")
+        return res
+    finally:
+        conn.close()
+
+
+@router.post("/research/leads/verify")
+def verify_lead_contacts(body: VerifyBatchIn) -> dict:
+    conn = connect()
+    try:
+        if body.contact_ids:
+            ids = [c for c in body.contact_ids if c][: max(1, min(200, body.limit * 4))]
+        else:
+            sql = (
+                "SELECT DISTINCT c.id AS id FROM contacts c "
+                "JOIN research_leads rl ON rl.business_id = c.business_id "
+                "WHERE COALESCE(c.email, '') != ''"
+            )
+            args: list = []
+            if body.client_business_id:
+                sql += " AND rl.client_business_id = ?"
+                args.append(body.client_business_id)
+            if body.queue_id:
+                sql += " AND rl.queue_id = ?"
+                args.append(body.queue_id)
+            # Only re-check what is not already proven, so a second click is cheap.
+            sql += " AND COALESCE(c.email_status, 'unverified') != 'verified'"
+            sql += " LIMIT ?"
+            args.append(max(1, min(200, body.limit)))
+            ids = [r["id"] for r in conn.execute(sql, args).fetchall()]
+        out = verify.verify_batch(conn, ids)
+        conn.commit()
+        return out
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------- gap audit
+#
+# "Open issues" is the other half of the user's ask: a prospect with a broken or
+# stale site is a prospect with a reason to reply. The audit is deterministic —
+# HTTP, headers and HTML only — so every reason to email is backed by evidence a
+# human can confirm. Nothing here sends mail or edits a lead's signal.
+
+class AuditIn(BaseModel):
+    domain: str
+
+
+class AuditBatchIn(BaseModel):
+    client_business_id: str | None = None
+    queue_id: str | None = None
+    limit: int = 8
+    rescore: bool = False
+
+
+@router.post("/audit/site")
+def audit_site_route(body: AuditIn) -> dict:
+    """Audit one domain on demand. Read-only; safe to click repeatedly."""
+    return audit.audit_site(body.domain)
+
+
+def _audit_rows(conn, sql: str, args: list, limit: int) -> list[dict]:
+    out: list[dict] = []
+    for row in conn.execute(sql, args).fetchall():
+        if len(out) >= limit:
+            break
+        domain = (row["domain"] or "").strip()
+        if not domain:
+            continue
+        try:
+            res = audit.audit_site(domain)
+        except Exception as exc:  # noqa: BLE001 - a bad site must not stop the batch
+            log.warning("audit failed", extra={"extra_fields": {
+                "lead_id": row["id"], "domain": domain, "error": str(exc)}})
+            continue
+        detail = audit.summarize(res)
+        conn.execute(
+            "UPDATE research_leads SET audit_score = ?, audit_detail = ? WHERE id = ?",
+            (res["score"], detail or None, row["id"]),
+        )
+        out.append({"id": row["id"], "name": row["name"], "domain": domain,
+                    "score": res["score"], "services": res["services"], "detail": detail})
+    conn.commit()
+    return out
+
+
+@router.post("/research/leads/audit")
+def audit_lead_batch(body: AuditBatchIn) -> dict:
+    """Audit the sites of leads from one research run.
+
+    Leads with a domain and no audit yet are done first; `rescore` re-checks
+    everything (sites get fixed, and a fixed site is no longer a reason to email).
+    """
+    limit = max(1, min(40, body.limit))
+    sql = ("SELECT id, name, domain, audit_score FROM research_leads "
+           "WHERE COALESCE(domain, '') != ''")
+    args: list = []
+    if body.client_business_id:
+        sql += " AND client_business_id = ?"
+        args.append(body.client_business_id)
+    if body.queue_id:
+        sql += " AND queue_id = ?"
+        args.append(body.queue_id)
+    if not body.rescore:
+        sql += " AND audit_score IS NULL"
+    sql += " ORDER BY fit DESC NULLS LAST, created_at DESC"
+    conn = connect()
+    try:
+        out = _audit_rows(conn, sql, args, limit)
+    finally:
+        conn.close()
+    scored = sorted(out, key=lambda x: -x["score"])
+    return {"checked": len(out), "results": out,
+            "best": scored[0] if scored else None}
+
+
+def audit_pending(limit: int = 2) -> int:
+    """Worker hook: audit a couple of un-audited leads per tick.
+
+    Deliberately tiny and best-effort. Auditing inside the research-complete
+    request would let one slow prospect site stall a whole research run, so it
+    happens on the send loop's idle time instead, a few at a time.
+    """
+    conn = connect()
+    try:
+        sql = ("SELECT id, name, domain, audit_score FROM research_leads "
+               "WHERE COALESCE(domain, '') != '' AND audit_score IS NULL "
+               "ORDER BY created_at DESC LIMIT ?")
+        done = _audit_rows(conn, sql, [max(1, limit)], max(1, limit))
+    except Exception:  # noqa: BLE001 - never break sending for an audit
+        log.exception("audit pass failed")
+        return 0
+    finally:
+        conn.close()
+    if done:
+        log.info("audited leads", extra={"extra_fields": {"count": len(done)}})
+    return len(done)
+
+
+# ------------------------------------------------------------ contact finder
+#
+# A lead with no address is unsendable: `POST /enroll` skips it with `no_contact`,
+# which is exactly why the pipeline used to dead-end after research. This closes
+# that gap without inventing anything — addresses come off the prospect's own
+# site, then get DNS-verified before they are usable.
+
+class DiscoverIn(BaseModel):
+    client_business_id: str | None = None
+    queue_id: str | None = None
+    limit: int = 8
+    rediscovar: bool = False
+
+
+def _insert_contact(conn, business_id: str, cand: dict, verify_detail: str | None,
+                    email_status: str) -> str | None:
+    cid = new_id()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO contacts (id, business_id, email, email_status, email_source,"
+        " verified_at, is_primary, created_at, verify_detail) VALUES (?,?,?,?,?,?,?,?,?)",
+        (cid, business_id, cand["email"], email_status, "website",
+         utcnow() if email_status == "verified" else None,
+         1 if cand.get("_primary") else 0, utcnow(), verify_detail),
+    )
+    return cid if cur.rowcount else None
+
+
+def discover_for_lead(conn, lead: dict, fetch=None) -> dict:
+    """Find + verify contacts for one lead. Returns a counted outcome."""
+    domain = (lead["domain"] or "").strip()
+    if not domain:
+        return {"lead_id": lead["id"], "found": 0, "reason": "no_domain"}
+    found = discover.discover(domain, _fetch=fetch)
+    cands = found["candidates"]
+    if not cands:
+        return {"lead_id": lead["id"], "found": 0, "reason": "no_address_published",
+                "pages_checked": found["pages_checked"]}
+
+    created, verified = 0, 0
+    has_existing = conn.execute("SELECT 1 FROM contacts WHERE business_id = ? LIMIT 1",
+                                (lead["business_id"],)).fetchone() is not None
+    for i, cand in enumerate(cands):
+        cand = {**cand, "_primary": i == 0 and not has_existing}
+        try:
+            verdict = verify.verify_address(cand["email"])
+        except Exception:  # noqa: BLE001 - a DNS hiccup must not lose the address
+            verdict = {"status": "unverified", "reason": "dns_unavailable", "detail": {}}
+        status = verdict.get("status") or "unverified"
+        raw_detail = verdict.get("detail")
+        detail = raw_detail if isinstance(raw_detail, str) else json.dumps(
+            {"reason": verdict.get("reason"), **(raw_detail or {})}, default=str)
+        if _insert_contact(conn, lead["business_id"], cand, detail, status):
+            created += 1
+            if status == "verified":
+                verified += 1
+        else:
+            # Address already known (unique index on email) — refresh its verdict.
+            conn.execute("UPDATE contacts SET email_status = ?, verify_detail = ?,"
+                         " verified_at = COALESCE(verified_at, ?) WHERE email = ?",
+                         (status, detail, utcnow() if status == "verified" else None,
+                          cand["email"]))
+    conn.commit()
+    return {"lead_id": lead["id"], "name": lead["name"], "domain": domain,
+            "found": created, "verified": verified, "reason": "ok"}
+
+
+@router.post("/research/leads/discover")
+def discover_contacts_route(body: DiscoverIn) -> dict:
+    """Find published email addresses for the leads of one research run."""
+    limit = max(1, min(25, body.limit))
+    sql = ("SELECT rl.id, rl.name, rl.domain, rl.business_id FROM research_leads rl "
+           "WHERE COALESCE(rl.domain, '') != ''")
+    args: list = []
+    if body.client_business_id:
+        sql += " AND rl.client_business_id = ?"
+        args.append(body.client_business_id)
+    if body.queue_id:
+        sql += " AND rl.queue_id = ?"
+        args.append(body.queue_id)
+    if not body.rediscovar:
+        sql += (" AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.business_id = rl.business_id)")
+    sql += " ORDER BY rl.fit DESC NULLS LAST, rl.created_at DESC LIMIT ?"
+    args.append(limit)
+
+    conn = connect()
+    results = []
+    try:
+        for lead in conn.execute(sql, args).fetchall():
+            try:
+                results.append(discover_for_lead(conn, lead))
+            except Exception:  # noqa: BLE001 - one odd site must not stop the batch
+                log.exception("discover failed", extra={"extra_fields": {"lead": lead["id"]}})
+    finally:
+        conn.close()
+    total = sum(r.get("found", 0) for r in results)
+    return {"leads": len(results), "contacts_found": total, "results": results}
+
+
+def discover_pending(limit: int = 1) -> int:
+    """Worker hook: one lead's contacts discovered per tick. Slow on purpose —
+    this makes outbound HTTP to a stranger's website, so it runs on idle time."""
+    conn = connect()
+    try:
+        sql = ("SELECT rl.id, rl.name, rl.domain, rl.business_id FROM research_leads rl "
+               "WHERE COALESCE(rl.domain, '') != '' AND NOT EXISTS "
+               "(SELECT 1 FROM contacts c WHERE c.business_id = rl.business_id) "
+               "ORDER BY rl.created_at DESC LIMIT ?")
+        todo = conn.execute(sql, (max(1, limit),)).fetchall()
+        n = 0
+        for lead in todo:
+            try:
+                discover_for_lead(conn, lead)
+                n += 1
+            except Exception:  # noqa: BLE001
+                log.exception("discover failed", extra={"extra_fields": {"lead": lead["id"]}})
+    finally:
+        conn.close()
+    return n
