@@ -79,6 +79,28 @@ def activate(sequence_id: str) -> dict:
 class EnrollIn(BaseModel):
     business_ids: list[str]
     skip_blocked: bool = True
+    # Optional. Normally inferred from the research that produced the lead.
+    client_business_id: str | None = None
+
+
+def _client_for_lead(conn, business_id: str, seq_client: str | None) -> str | None:
+    """Which client's voice does this lead belong to?
+
+    A business can be researched for more than one client (the same garage
+    would buy SEO from an agency and doors from a supplier). The research row
+    is the only place that records which client a lead was found *for*, so it
+    is the source of truth — taking "the most recent row" instead would let
+    client B's campaign send the note client A wrote.
+    """
+    if seq_client:
+        return seq_client
+    row = conn.execute(
+        "SELECT client_business_id FROM research_leads"
+        " WHERE business_id = ? AND client_business_id IS NOT NULL"
+        " ORDER BY created_at DESC LIMIT 1",
+        (business_id,),
+    ).fetchone()
+    return row["client_business_id"] if row else None
 
 
 @router.post("/sequences/{sequence_id}/enroll")
@@ -88,6 +110,7 @@ def enroll(sequence_id: str, body: EnrollIn) -> dict:
         seq = conn.execute("SELECT * FROM sequences WHERE id = ?", (sequence_id,)).fetchone()
         if not seq:
             raise HTTPException(404, "sequence not found")
+        seq_client = (seq["client_business_id"] if "client_business_id" in seq.keys() else None)
         enrolled, skipped = [], []
         for bid in body.business_ids:
             contact = conn.execute(
@@ -106,19 +129,22 @@ def enroll(sequence_id: str, body: EnrollIn) -> dict:
             # A researched lead can carry the agent's own first touch, written for
             # this company about the signal we actually found. Enrolling it uses
             # that instead of the sequence's generic step 1.
+            client_id = body.client_business_id or _client_for_lead(conn, bid, seq_client)
             rl = conn.execute(
                 "SELECT email_subject, email_body FROM research_leads"
                 " WHERE business_id = ? AND COALESCE(email_subject, '') != ''"
+                " AND (client_business_id = ? OR ? IS NULL)"
                 " ORDER BY created_at DESC LIMIT 1",
-                (bid,),
+                (bid, client_id, client_id),
             ).fetchone()
             conn.execute(
                 """INSERT INTO enrollments (id,sequence_id,business_id,contact_id,status,current_step,
-                   next_send_at,created_at,override_subject,override_body)
-                   VALUES (?,?,?,?,'active',0,?,?,?,?)
+                   next_send_at,created_at,override_subject,override_body,client_business_id)
+                   VALUES (?,?,?,?,'active',0,?,?,?,?,?)
                    ON CONFLICT (sequence_id, business_id) DO NOTHING""",
                 (new_id(), sequence_id, bid, contact["id"], utcnow(), utcnow(),
-                 rl["email_subject"] if rl else None, rl["email_body"] if rl else None),
+                 rl["email_subject"] if rl else None, rl["email_body"] if rl else None,
+                 client_id),
             )
             enrolled.append(bid)
         conn.commit()
@@ -132,6 +158,40 @@ def render(template: str, ctx: dict) -> str:
         key = m.group(1).strip()
         return str(ctx.get(key, ""))
     return re.sub(r"\{\{\s*([a-z_]+)\s*\}\}", sub, template or "")
+
+
+def _client_voice(client, fallback: dict | None) -> dict:
+    """The client's own voice, built from the research we already cached.
+
+    A follow-up step written with {{ai_snippet}} is filled at send time from the
+    *workspace* profile by default. In client mode that would slide a pitch for
+    our services into an email the client signed. The cached site research is
+    the only description of the client we actually have, so use it.
+    """
+    voice = dict(fallback or {})
+    try:
+        stored = client["site_research"] if "site_research" in client.keys() else None
+        data = json.loads(stored) if isinstance(stored, str) and stored.strip() else (stored or {})
+    except Exception:  # noqa: BLE001 - bad cache must not stop a send
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return ai.voice_from_research(data, voice)
+
+
+def _client_reply_to(conn, client_id: str) -> str:
+    """A verified address that belongs to the client, or ''.
+
+    Replies have to reach the client, or the client never sees the lead answer
+    and the whole exercise is pointless. We only use an address that was
+    published on their own site and passed verification — nothing invented.
+    """
+    row = conn.execute(
+        "SELECT email FROM contacts WHERE business_id = ?"
+        " AND email_status IN ('valid', 'verified') ORDER BY is_primary DESC LIMIT 1",
+        (client_id,),
+    ).fetchone()
+    return (row["email"] if row else "") or ""
 
 
 @router.post("/worker/tick")
@@ -152,7 +212,9 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
         ).fetchone()
 
         due = rows(conn.execute(
-            """SELECT e.*, s.stop_on_reply, s.send_window, s.name AS seq_name FROM enrollments e
+            """SELECT e.*, s.stop_on_reply, s.send_window, s.name AS seq_name,
+                      s.reply_to AS seq_reply_to, s.from_email AS seq_from_email
+               FROM enrollments e
                JOIN sequences s ON s.id = e.sequence_id
                WHERE s.workspace_id = ? AND e.status = 'active'
                  AND (e.next_send_at IS NULL OR e.next_send_at <= ?)
@@ -206,6 +268,23 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
 
             from_email = settings.mailgun_sender
             from_name = settings.mailgun_sender_name or ws["name"]
+            reply_to = settings.mailgun_reply_to or from_email
+            # Who is speaking? A lead researched for a client is mailed *as*
+            # that client: their name on the envelope, replies routed to them,
+            # and a footer identifying them as the sender. Skipping this sends
+            # an email signed as the researched company from our own domain —
+            # the exact inversion of the direction the research runs in.
+            client = None
+            client_id = en["client_business_id"] if "client_business_id" in en.keys() else None
+            if client_id:
+                client = conn.execute("SELECT * FROM businesses WHERE id = ?", (client_id,)).fetchone()
+            if client:
+                from_name = client["name"]
+                explicit_from = (en["seq_from_email"] or "").strip() if "seq_from_email" in en.keys() else ""
+                from_email = explicit_from or from_email
+                reply_to = (
+                    (en["seq_reply_to"] or "").strip() if "seq_reply_to" in en.keys() else ""
+                ) or _client_reply_to(conn, client["id"]) or reply_to
             verdict = compliance.check_send(
                 workspace_id, contact["email"], contact["email_status"], from_email, ws["daily_send_cap"]
             )
@@ -241,7 +320,9 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
                 except Exception:  # noqa: BLE001 - a bad cache must never stop a send
                     observed = ""
                 gen = ai.generate_snippet(
-                    dict(profile) if profile else {}, dict(biz), dict(contact), detail=observed
+                    _client_voice(client, dict(profile) if profile else {}) if client else
+                    (dict(profile) if profile else {}),
+                    dict(biz), dict(contact), detail=observed
                 )
                 snippet_text = gen["text"]
                 body_tpl = body_tpl.replace("{{ai_snippet}}", snippet_text)
@@ -257,18 +338,29 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
             ).fetchone()
             if override and step["step_order"] == 1:
                 if (override["override_subject"] or "").strip():
-                    subject = override["override_subject"].strip()
+                    subject = render(override["override_subject"].strip(), ctx)
                 if (override["override_body"] or "").strip():
-                    body = override["override_body"].strip()
+                    # Rendered, not pasted: a client's first-touch template keeps
+                    # {{business_name}}/{{city}} so one note can serve every lead.
+                    body = render(override["override_body"].strip(), ctx)
                     snippet_text = snippet_text or "lead-research"
 
             token = compliance.unsubscribe_token(workspace_id, contact["email"])
-            body += compliance.footer(dict(ws), token)
+            if client:
+                # The client is the sender, so the client is who the footer
+                # has to identify. Their address comes from research; when we
+                # do not have one we use ours and say on the message that it
+                # was sent on their behalf, rather than leaving the reader
+                # unable to tell who is actually emailing them.
+                addr = compliance.address_line(dict(client)) or ws["physical_address"]
+                body += compliance.footer_for(client["name"], addr, token, operator=ws["name"])
+            else:
+                body += compliance.footer(dict(ws), token)
 
             unsub_url = f"{settings.public_base_url}/u/{token}"
             sent = mailer.send(
                 from_email, from_name, contact["email"], subject, body,
-                reply_to=settings.mailgun_reply_to or from_email,
+                reply_to=reply_to,
                 headers=mailer.build_unsub_headers(unsub_url),
             )
 
@@ -306,6 +398,10 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
                     conn.execute("UPDATE enrollments SET status='finished' WHERE id=?", (en["id"],))
                 results.append({"enrollment": en["id"], "status": "sent", "to": contact["email"],
                                 "subject": subject, "provider_id": sent["provider_id"],
+                                # Enough to answer "who did this come from?" without
+                                # going back to the database after the fact.
+                                "from": f"{from_name} <{from_email}>",
+                                "reply_to": reply_to, "as_client": bool(client),
                                 "next_send_at": next_at})
             conn.commit()
         return {"processed": len(results), "results": results}

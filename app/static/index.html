@@ -588,11 +588,11 @@ const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="
 /* ---------------- research ---------------- */
 async function viewResearch(v) {
   v.innerHTML =
-    '<div class="h"><div><h2>Research</h2><p>Paste the domain of a business you are finding customers for. The agent learns what that business sells, then hunts other companies in its market that could use those services right now, and writes the email.</p></div>' +
+    '<div class="h"><div><h2>Research</h2><p>Paste the domain of the business you are running outreach FOR. The agent learns what that business sells, then finds other companies that buy work like that right now, and writes the first touch that business will send them.</p></div>' +
       '<div class="row" id="rsStatus"><span class="pill info">checking model</span></div></div>' +
     '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
       '<div class="row" style="align-items:flex-end;gap:8px">' +
-        '<div class="field" style="flex:1;min-width:240px"><label>Prospect domain</label>' +
+        '<div class="field" style="flex:1;min-width:240px"><label>Client domain</label>' +
           '<input id="rsUrl" placeholder="buckeyeridgeroofing.com" autocomplete="off" spellcheck="false"></div>' +
         '<button class="btn" id="rsGo">Research site</button>' +
         '<button class="btn ghost" id="rsAgent" title="Queues the domain for the Hermes agent, which reads the site with its own tools">Research with the agent</button>' +
@@ -697,7 +697,7 @@ async function rsAgentResearch(url) {
     const p = row.profile || {};
     state.rs = { url: p.url || row.url || url, profile: p, brief: '', businessId: row.business_id || null, leads: null, filters: null };
     rsRender();
-    toast('The agent researched it' + (row.draft ? ' and wrote a draft' : ''), 'ok');
+    toast('The agent researched it' + (row.draft ? ' and wrote their first touch' : ''), 'ok');
     if (row.draft) rsShowAgentDraft(row.draft, p);
   };
   tick();
@@ -706,13 +706,14 @@ async function rsAgentResearch(url) {
 function rsShowAgentDraft(draft, profile) {
   const pill = (txt, kind) => '<span class="pill ' + kind + '">' + esc(txt) + '</span>';
   const words = String(draft.body || '').trim().split(/\s+/).filter(Boolean).length;
-  openModal('Draft for ' + (profile.business_name || 'this lead'),
+  const client = profile.business_name || 'the researched business';
+  openModal('First touch from ' + client,
     '<div class="field" style="margin-bottom:10px"><label>Subject</label>' +
       '<input id="rsSubject" value="' + esc(draft.subject || '') + '"></div>' +
     '<div class="field" style="margin-bottom:10px"><label>Body</label>' +
       '<textarea id="rsBody" rows="14" style="width:100%;font-family:inherit">' + esc(draft.body || '') + '</textarea></div>' +
     (draft.grounded_on ? '<p class="muted" style="font-size:12.5px">Citing: ' + esc(draft.grounded_on) + '</p>' : '') +
-    '<p class="muted" style="font-size:12.5px">Written by the agent. The contact is unverified, so the send gate will skip this lead until someone verifies it.</p>',
+    '<p class="muted" style="font-size:12.5px">This is ' + esc(client) + '\u2019s own template for a prospect they have not met, not an email to ' + esc(client) + '. It backs up any lead that arrives without a per-lead first touch, so {{business_name}} and {{city}} fill in at send time.</p>',
     '<div class="row">' + pill('agent written', 'ok') + pill(words + ' words', 'info') + '<div class="spacer"></div>' +
       '<button class="btn ghost sm" id="rsCopy">Copy</button>' +
       '<button class="btn sm" id="rsClose">Done</button></div>');
@@ -827,10 +828,10 @@ function rsRender() {
       '</div>' +
       '<div class="action-bar">' +
         (rs.businessId
-          ? '<span class="pill ok">saved as lead</span>'
-          : '<button class="btn ghost sm" id="rsImport">Save as lead</button>') +
-        '<button class="btn ghost sm" id="rsFind">Find matching leads</button>' +
-        '<button class="btn sm" id="rsDraft"' + (rs.businessId ? '' : ' disabled title="Save it as a lead first"') + '>Draft email</button>' +
+          ? '<span class="pill ok">saved as client</span>'
+          : '<button class="btn ghost sm" id="rsImport">Save as client</button>') +
+        '<button class="btn ghost sm" id="rsFind">Find their prospects</button>' +
+        '<button class="btn sm" id="rsDraft"' + (rs.businessId ? '' : ' disabled title="Save it as a client first"') + '>Draft first touch</button>' +
       '</div>' +
     '</div>' +
     '<div id="rsLeadsOut"></div>';
@@ -866,14 +867,14 @@ async function rsImport() {
     });
     rs.businessId = d.business ? d.business.id : null;
     rsRender();
-    toast(d.created ? 'Saved as a lead' : 'Matched an existing lead on this domain', 'ok');
+    toast(d.created ? 'Saved as your client' : 'Matched an existing business on this domain', 'ok');
     if (d.contact_email) toast('Email saved unverified: ' + d.contact_email, '');
   } catch (err) { toast(err.message, 'bad'); }
 }
 
 async function rsSaveContact(email) {
   const rs = state.rs || {};
-  if (!rs.businessId) return toast('Save the business as a lead first', 'bad');
+  if (!rs.businessId) return toast('Save the client first', 'bad');
   try {
     const d = await api('/api/research/contact', {
       method: 'POST',
@@ -887,7 +888,7 @@ async function rsFindLeads() {
   const rs = state.rs || {};
   const host = $('#rsLeadsOut');
   if (!host) return;
-  host.innerHTML = '<div class="panel"><div class="empty">Looking for the same trade in the same area ...</div></div>';
+  host.innerHTML = '<div class="panel"><div class="empty">Finding the businesses that could buy what they sell ...</div></div>';
   try {
     const d = await api('/api/research/leads', {
       method: 'POST',
@@ -896,6 +897,7 @@ async function rsFindLeads() {
     rs.leads = d.results || [];
     rs.filters = d.filters || null;
     rs.hint = d.hint || null;
+    rs.note = d.direction_note || null;
     rsRenderLeads();
     toast(d.count + ' lead' + (d.count === 1 ? '' : 's') + ' matched', d.count ? 'ok' : '');
   } catch (err) {
@@ -909,9 +911,14 @@ function rsRenderLeads() {
   const host = $('#rsLeadsOut');
   if (!host) return;
   const f = rs.filters || {};
-  const head = '<div class="panel-h"><div><h3 style="margin:0">Matching leads</h3>' +
+  const tradeLabel = (f.categories && f.categories.length)
+    ? f.categories.join(' · ')
+    : (f.category || '');
+  const head = '<div class="panel-h"><div><h3 style="margin:0">Prospects for them</h3>' +
     '<div class="muted" style="font-size:12.5px">' +
-      esc([f.category, f.city, f.state].filter(Boolean).join(' · ') || 'no filters') + '</div></div>' +
+      esc([tradeLabel, f.city, f.state].filter(Boolean).join(' · ') || 'no filters') + '</div>' +
+      (rs.note ? '<div class="muted" style="font-size:12px">' + esc(rs.note) + '</div>' : '') +
+    '</div>' +
     '<div class="row"><span class="muted">' + nfmt((rs.leads || []).length) + '</span></div></div>';
   if (!(rs.leads || []).length) {
     host.innerHTML = '<div class="panel">' + head + '<div class="empty">' +
@@ -965,8 +972,16 @@ async function rsDraft(businessId) {
   ].join(' ');
   const who = d.contact_name ? d.contact_name + ' <' + (d.contact_email || '') + '>'
     : (d.contact_email ? d.contact_email : 'no contact on file');
-  openModal('Email for ' + (d.business_name || 'this lead'),
+  const title = d.as_client
+    ? 'Email from ' + d.as_client + ' to ' + (d.business_name || 'this lead')
+    : 'Your email to ' + (d.business_name || 'this lead');
+  openModal(title,
+    '<div class="field" style="margin-bottom:10px"><label>From</label><div>' +
+      esc(d.as_client || 'you (this workspace)') + '</div></div>' +
     '<div class="field" style="margin-bottom:10px"><label>To</label><div>' + esc(who) + '</div></div>' +
+    (d.as_client ? '<p class="muted" style="font-size:12.5px">' + esc(d.as_client) +
+      ' is the client. This reaches their prospect under their name — it is not an email to ' +
+      esc(d.business_name || 'the researched company') + '.</p>' : '') +
     '<div class="field" style="margin-bottom:10px"><label>Subject</label>' +
       '<input id="rsSubject" value="' + esc(d.subject || '') + '"></div>' +
     '<div class="field" style="margin-bottom:10px"><label>Body</label>' +

@@ -244,6 +244,36 @@ def _fallback_email(profile: dict, business: dict, contact: dict | None, brief: 
     return {"subject": subject, "body": body.strip()}
 
 
+def voice_from_research(data: dict | None, fallback: dict | None = None) -> dict:
+    """Turn cached site research into a sending voice.
+
+    Used when the researched business is the *client* and the mail goes out in
+    their name. The model needs the client's offer, not ours, or the email
+    pitches the wrong company to that company's own prospects.
+    """
+    voice = dict(fallback or {})
+    data = data if isinstance(data, dict) else {}
+    services = data.get("services") or []
+    if not isinstance(services, list):
+        services = [str(services)]
+    offer = " ".join(
+        [str(data.get("what_they_do") or "").strip()] + [str(s).strip() for s in services[:6]]
+    ).strip()
+    if offer:
+        voice["offer"] = offer
+    icp = data.get("icp") or data.get("customers")
+    if icp:
+        voice["icp"] = icp
+    diffs = data.get("differentiators") or []
+    if diffs:
+        voice["proof_points"] = diffs if isinstance(diffs, str) else json.dumps(diffs)
+    voice["tone"] = data.get("tone") or voice.get("tone") or "direct, peer-to-peer"
+    voice["banned_phrases"] = "[]"
+    if data.get("business_name"):
+        voice["name"] = data["business_name"]
+    return voice
+
+
 def draft_email(profile: dict | None, business: dict | None, contact: dict | None = None,
                 brief: str = "", length: int = 100, signature: str = "") -> dict:
     """Full subject+body for one prospect, grounded in their own website.

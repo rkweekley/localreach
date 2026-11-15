@@ -73,6 +73,17 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # swap in the email written for that company instead of the template.
     ("enrollments", "override_subject", "TEXT"),
     ("enrollments", "override_body", "TEXT"),
+    # Who is speaking in this email. In lead-generation mode the researched
+    # business is the client and the leads are its prospects, so the message is
+    # written and signed as the client. NULL means the workspace speaks for
+    # itself (the app's own prospecting), which is the pre-client behaviour.
+    ("enrollments", "client_business_id", "TEXT"),
+    ("sequences", "client_business_id", "TEXT"),
+    ("sequences", "reply_to", "TEXT"),
+    # Sending address for this sequence. Only useful once the client's own
+    # domain is verified in Mailgun; until then the workspace's verified
+    # sender carries the mail with the client's name on it.
+    ("sequences", "from_email", "TEXT"),
 ]
 
 

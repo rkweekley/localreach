@@ -1,9 +1,15 @@
 """Domain research -> leads -> emails, driven from the UI.
 
-Three capabilities the operator gets from one domain they type in:
-  1. POST /research/domain   read the prospect's site and say what they sell
-  2. POST /research/leads    turn that into a mailable lead list from the DB
-  3. POST /research/email    write one email per lead, citing their own site
+The domain the operator types in is the CLIENT: the business whose outreach we
+are running. The leads are that client's prospects - companies that would buy
+what the client sells. Three capabilities:
+
+  1. POST /research/domain   read the client's site and say what they sell
+  2. POST /research/leads    find the buyer trades in the DB and list them
+  3. POST /research/email    draft the client's first touch, one per lead
+
+Direct prospecting (no client domain) still works: then the domain is the
+prospect and the mail speaks for this workspace.
 
 Everything here is additive to the existing /api surface and sits behind the
 same bearer token as the rest of the app. No new credential, no new trust
@@ -191,27 +197,63 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
-def _best_category(conn, profile: dict) -> tuple[str | None, float, list[dict]]:
-    """Map free-text industry onto the taxonomy already in this database."""
+def _singular(tok: str) -> str:
+    """Crude plural folding so "contractor" matches "contractors"."""
+    if len(tok) > 3 and tok.endswith("s") and not tok.endswith("ss"):
+        return tok[:-1]
+    return tok
+
+
+def _norm_tokens(text: str) -> set[str]:
+    return {_singular(t) for t in _tokens(text)}
+
+
+def _buyer_categories(conn, profile: dict) -> tuple[list[str], float, list[dict], str]:
+    """Find the categories in this database that *buy* what the client sells.
+
+    The researched business is the seller, so matching its own category returns
+    its competitors, which is precisely backwards for a lead list. Buyers are
+    described by the client's ICP, not by the client: we match the local taxonomy
+    against `icp` / `customers` / `buying_signals` and drop any category that
+    overlaps the seller's own trade.
+
+    Returns (categories, confidence, options, note). An empty list means we found
+    no buyer category; the caller then searches the area unfiltered by trade and
+    says so, rather than pretending a trade match exists.
+    """
     cats = rows(conn.execute(
         """SELECT category, COUNT(*) AS n FROM businesses
             WHERE category IS NOT NULL AND category != ''
          GROUP BY category ORDER BY n DESC LIMIT 400"""
     ))
     if not cats:
-        return None, 0.0, []
-    want = _tokens(" ".join([
+        return [], 0.0, [], "No categories in this database yet. Import a lead list first."
+
+    seller = _norm_tokens(" ".join([
         str(profile.get("industry") or ""),
         str(profile.get("what_they_do") or ""),
         " ".join(str(s) for s in profile.get("services") or []),
     ]))
+    want = _norm_tokens(" ".join([
+        str(profile.get("icp") or ""),
+        str(profile.get("customers") or ""),
+        str(profile.get("who_pays") or ""),
+        " ".join(str(s) for s in profile.get("buying_signals") or []),
+    ]))
     if not want:
-        return None, 0.0, cats[:6]
+        return [], 0.0, cats[:6], (
+            "This profile does not say who buys from them, so no trade filter "
+            "was applied. Add a customer description to sharpen it."
+        )
+
     scored = []
     for c in cats:
-        have = _tokens(str(c["category"]))
-        if not have:
-            continue
+        have = _norm_tokens(str(c["category"]))
+        if not have or have <= seller:
+            continue  # the client's own trade, or a strict slice of it: a rival
+        union = have | seller
+        if union and len(have & seller) / len(union) >= 0.6:
+            continue  # near-synonym of the client's trade, still a rival
         overlap = len(want & have)
         if not overlap:
             continue
@@ -219,8 +261,16 @@ def _best_category(conn, profile: dict) -> tuple[str | None, float, list[dict]]:
                        "score": round(overlap / max(1, len(have)), 3)})
     scored.sort(key=lambda r: (-r["score"], -r["n"]))
     if not scored:
-        return None, 0.0, cats[:6]
-    return scored[0]["category"], scored[0]["score"], scored[:6]
+        return [], 0.0, cats[:6], (
+            "No buyer category in this database matches their customers, so the "
+            "search is unfiltered by trade. The agent-researched leads are the "
+            "sharper list."
+        )
+    top = scored[:3]
+    return [r["category"] for r in top], top[0]["score"], scored[:6], (
+        f"Treated {profile.get('name') or 'the researched business'} as the seller; "
+        f"these are the trades that buy from them."
+    )
 
 
 class LeadPullIn(BaseModel):
@@ -260,8 +310,12 @@ def pull_leads(body: LeadPullIn, request: Request) -> dict:
             seed_business_id = seed["id"] if seed else None
 
         category = body.category
-        if not category and profile:
-            category, _score, _alts = _best_category(conn, profile)
+        targets: list[str] = [category] if category else []
+        note = ""
+        cat_score = 0.0
+        alts: list[dict] = []
+        if not targets and profile:
+            targets, cat_score, alts, note = _buyer_categories(conn, profile)
         city = body.city
         state = body.state
         if not city and not state and profile.get("service_area"):
@@ -272,8 +326,9 @@ def pull_leads(body: LeadPullIn, request: Request) -> dict:
 
         where = ["1=1"]
         args: list[Any] = []
-        if category:
-            where.append("b.category = ?"); args.append(category)
+        if targets:
+            where.append("b.category IN (" + ",".join("?" * len(targets)) + ")")
+            args.extend(targets)
         if city:
             where.append("b.city = ?"); args.append(city)
         if state:
@@ -312,25 +367,27 @@ def pull_leads(body: LeadPullIn, request: Request) -> dict:
         for r in results:
             r["already_enrolled"] = r["id"] in enrolled
             r["researched"] = bool(r["researched"])
-
-        _cat, cat_score, alts = _best_category(conn, profile) if profile else (None, 0, [])
     finally:
         conn.close()
 
-    filters = {"category": category, "city": city, "state": state}
+    filters = {"category": category, "categories": targets, "city": city, "state": state}
     return {
         "filters": filters,
-        "matched_category": category,
+        "matched_category": targets[0] if targets else None,
+        "target_categories": targets,
         "category_confidence": cat_score,
         "category_options": alts,
+        "direction_note": note,
         "profile": profile or None,
         "brief": research.brief(profile) if profile else "",
         "count": len(results),
         "results": results,
         "hint": (
             None if results else
-            "No businesses match yet. Import a lead list for "
-            f"{city or 'this area'}, or relax the filters."
+            (note or "") + (
+                f" No prospects in {city or 'this area'} match yet. Import a lead "
+                "list, or relax the filters."
+            )
         ),
     }
 
@@ -341,6 +398,9 @@ class EmailIn(BaseModel):
     workspace_id: str
     business_id: str
     profile_id: str | None = None
+    # Who the email is written *as*. Normally left blank: the lead's research
+    # row already records which client it was found for.
+    client_business_id: str | None = None
     length: int = 100
     signature: str = ""
     refresh_research: bool = False
@@ -348,7 +408,14 @@ class EmailIn(BaseModel):
 
 @router.post("/research/email")
 def draft_for_business(body: EmailIn) -> dict:
-    """One grounded email for one lead. Refreshes site research on demand."""
+    """One grounded email for one lead.
+
+    Direction matters more than grammar here. When the lead was researched for
+    a client, the email is written *as that client*, addressed to the lead —
+    it is the client's outreach, run under the client's name. When there is no
+    client, the workspace is selling its own services, which is the original
+    behaviour and still the right one for direct prospecting.
+    """
     conn = connect()
     try:
         biz = conn.execute("SELECT * FROM businesses WHERE id = ?", (body.business_id,)).fetchone()
@@ -362,22 +429,39 @@ def draft_for_business(body: EmailIn) -> dict:
         if c:
             contact = dict(c)
 
-        seller = None
-        if body.profile_id:
-            p = conn.execute("SELECT * FROM ai_profiles WHERE id = ?", (body.profile_id,)).fetchone()
-            seller = dict(p) if p else None
-        if not seller:
-            p = conn.execute(
-                "SELECT * FROM ai_profiles WHERE workspace_id = ? ORDER BY readiness DESC LIMIT 1",
-                (body.workspace_id,),
+        # The client is the researched business this lead was found for.
+        client = None
+        if body.client_business_id:
+            crow = conn.execute(
+                "SELECT * FROM businesses WHERE id = ?", (body.client_business_id,)
             ).fetchone()
-            seller = dict(p) if p else None
-        if not seller:
-            raise HTTPException(
-                422,
-                "No AI profile for this workspace. Create one under Voice first: "
-                "the email needs an offer and tone to be worth sending.",
-            )
+            client = dict(crow) if crow else None
+        if client is None:
+            crow = conn.execute(
+                "SELECT b.* FROM research_leads rl JOIN businesses b ON b.id = rl.client_business_id"
+                " WHERE rl.business_id = ? AND rl.client_business_id IS NOT NULL"
+                " ORDER BY rl.created_at DESC LIMIT 1",
+                (body.business_id,),
+            ).fetchone()
+            client = dict(crow) if crow else None
+
+        seller = None
+        if client is None:
+            if body.profile_id:
+                p = conn.execute("SELECT * FROM ai_profiles WHERE id = ?", (body.profile_id,)).fetchone()
+                seller = dict(p) if p else None
+            if not seller:
+                p = conn.execute(
+                    "SELECT * FROM ai_profiles WHERE workspace_id = ? ORDER BY readiness DESC LIMIT 1",
+                    (body.workspace_id,),
+                ).fetchone()
+                seller = dict(p) if p else None
+            if not seller:
+                raise HTTPException(
+                    422,
+                    "No AI profile for this workspace. Create one under Voice first: "
+                    "the email needs an offer and tone to be worth sending.",
+                )
 
         profile = _load_profile(biz)
     finally:
@@ -398,12 +482,26 @@ def draft_for_business(body: EmailIn) -> dict:
                 conn.close()
 
     brief = research.brief(profile) if profile else ""
-    draft = ai.draft_email(seller, business, contact, brief, body.length, body.signature)
+    signature = body.signature
+    if client is not None:
+        # Speak as the client. Their own site research is the only description
+        # of them we hold, and it is enough for the model to write in their
+        # voice instead of pitching our services to their prospects.
+        seller = ai.voice_from_research(_load_profile(client), seller or {})
+        seller["name"] = client.get("name") or ""
+        signature = signature or seller["name"]
+    draft = ai.draft_email(seller, business, contact, brief, body.length, signature)
     draft.update({
         "business_id": body.business_id,
         "business_name": business.get("name"),
         "contact_email": (contact or {}).get("email"),
         "contact_name": (contact or {}).get("full_name"),
+        # Who this email is from and who it is to. The UI needs both to label
+        # the draft honestly; without them a client's outreach looks like ours.
+        "direction": "client_to_lead" if client else "us_to_prospect",
+        "as_client": (client or {}).get("name") or "",
+        "as_client_id": (client or {}).get("id") or "",
+        "signature": signature,
         "evidence": (profile or {}).get("talking_point") or "",
         "pages": (profile or {}).get("pages") or [],
         "research_error": fetch_error,
@@ -491,6 +589,7 @@ def _store_research_leads(
     queue_id: str | None,
     client_bid: str | None,
     profile: dict,
+    template: dict | None = None,
 ) -> dict:
     """Save the companies the agent found *for* the researched business.
 
@@ -579,6 +678,13 @@ def _store_research_leads(
             email_obj = {}
         subject = str(email_obj.get("subject") or "").strip()[:180]
         body = str(email_obj.get("body") or "").strip()[:4000]
+        # No per-lead note? Use the client's own first-touch template rather than
+        # letting the sequence's workspace-voice copy go out under the client's
+        # signature. {{business_name}}/{{city}} survive into the override and are
+        # filled from *this* lead at send time.
+        if not subject and not body and isinstance(template, dict):
+            subject = str(template.get("subject") or "").strip()[:180]
+            body = str(template.get("body") or "").strip()[:4000]
 
         payload = (
             name, domain, str(lead.get("why_now") or "")[:600],
@@ -909,7 +1015,8 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
         elif body.status == "done":
             lead = _upsert_lead(conn, row["workspace_id"], profile)
             summary = _store_research_leads(
-                conn, row["workspace_id"], qid, lead["business_id"], profile
+                conn, row["workspace_id"], qid, lead["business_id"], profile,
+                template=body.draft if isinstance(body.draft, dict) else None,
             )
             profile["leads_found"] = summary["created"] + summary["updated"]
             profile["leads_list_id"] = summary["list_id"]

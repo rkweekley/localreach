@@ -44,7 +44,9 @@ BATCH = max(1, min(int(os.environ.get("BATCH", "1") or 1), 5))
 TIMEOUT = int(os.environ.get("AGENT_TIMEOUT_S", "840") or 840)
 DRY_RUN = (os.environ.get("DRY_RUN", "1") or "1").strip().lower() not in ("0", "false", "no", "off")
 
-PROMPT = """You are a lead researcher. Today's domain belongs to a BUSINESS WE WANT TO SELL TO, and its own customers are what we are hunting. Do two jobs in one turn: profile the business, then find OTHER companies that could use the services this business sells right now. Those companies are its leads, and they are the whole point of the turn.
+PROMPT = """You are a lead researcher working on behalf of a client. Today's domain belongs to the CLIENT: a business that has asked us to find them customers. Its own customers are what we are hunting. Do two jobs in one turn: profile the client, then find OTHER companies that could use the services this client sells right now. Those companies are its leads, and they are the whole point of the turn.
+
+Everything we write goes out under the CLIENT's name, never ours. We are not selling to the client's prospects on our own behalf, and we are never emailing the client.
 
 Domain: {domain}
 
@@ -80,7 +82,8 @@ Rules for the profile:
 - `service_area` is "City, ST" when the site names one; leave it "" if it does not.
 - `what_they_do` is one plain sentence a stranger would understand.
 - `talking_point` is one specific, quotable detail from the site that proves a human looked at it.
-- The draft is an email to the researched business itself, offering what WE do: 60-90 words, first person, no "I hope this finds you well", no flattery, one concrete observation from their site, one sentence on what we do, one low-friction question. No em dashes. Sign as Ryan.
+- `draft` is the client's reusable FIRST TOUCH TEMPLATE: it will be used for any lead that arrives without its own per-lead email, so it is written by the client to a prospect they have not met. Address it to a company in general terms and use {{business_name}} and {{city}} as placeholders where a name belongs. 50-90 words, first person plural as the client, one sentence on what the client does, one low-friction question. No em dashes, no "I hope this finds you well", no flattery, no numbers or facts you did not read. Sign with the researched business's own name.
+- The template is never addressed to the researched business and never offers what WE do. It is their voice, their offer, their signature.
 - The subject is 6 words max, specific, no clickbait, no colon. Keep company and place names capitalized.
 
 Rules for the email on each lead — this is the part that gets sent:

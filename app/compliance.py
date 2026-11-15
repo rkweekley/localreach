@@ -163,3 +163,33 @@ def footer(workspace: dict, token: str) -> str:
         f"{workspace['name']} · {workspace['physical_address']}\n"
         f"Don't want to hear from me? One click and you're out: {base}/u/{token}\n"
     )
+
+
+def address_line(business: dict) -> str:
+    """`1 Main St, Lowell, OH 45744` from whatever address parts we have verified."""
+    parts = [business.get("address1"), business.get("city"), business.get("state")]
+    line = ", ".join(str(p).strip() for p in parts if p)
+    postal = (business.get("postal_code") or "").strip()
+    if postal:
+        line = f"{line} {postal}".strip()
+    return line
+
+
+def footer_for(sender_name: str, address: str, token: str, operator: str = "") -> str:
+    """Footer for an email sent *as the client*, not as the workspace.
+
+    CAN-SPAM identifies the sender, and in lead-generation mode the sender is
+    the researched business: its name and postal address belong here. Naming
+    the operator under an email the client signed is both confusing to the
+    reader and not a real identification of who sent it — so when the client
+    has no address on file we fall back to the operator's address and say so
+    on the face of the message instead of quietly implying the client sent it
+    from nowhere.
+    """
+    base = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+    who = f"{sender_name} · {address}" if address else sender_name
+    lines = ["", "", "--", who]
+    if operator and operator != sender_name:
+        lines.append(f"Sent on behalf of {sender_name} by {operator}.")
+    lines.append(f"Don't want to hear from me? One click and you're out: {base}/u/{token}")
+    return "\n".join(lines) + "\n"
