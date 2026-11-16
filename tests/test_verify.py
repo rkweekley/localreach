@@ -191,7 +191,7 @@ def test_a_directory_listing_does_not_donate_its_own_address(monkeypatch):
     _, cid = _seed_contact("info@live-co.com")
     conn = connect()
     try:
-        conn.execute("UPDATE businesses SET domain = 'business.mariettachamber.com' "
+        conn.execute("UPDATE businesses SET domain = 'business.live-co.com' "
                      "WHERE id = (SELECT business_id FROM contacts WHERE id = ?)", (cid,))
         conn.commit()
         res = verify.verify_contact(conn, cid)
@@ -199,7 +199,15 @@ def test_a_directory_listing_does_not_donate_its_own_address(monkeypatch):
     finally:
         conn.close()
     assert res["email_status"] == "risky", res
-    assert res["reason"] == "foreign_domain"
+    assert res["reason"] == "directory_host"
+
+
+def test_own_subdomain_is_not_a_directory():
+    """A business that simply runs mail. on its own domain keeps its address."""
+    assert not verify.directory_host("info@mydomain.com", "mail.mydomain.com")
+    assert not verify.directory_host("info@mydomain.com", "www.mydomain.com")
+    assert verify.directory_host("info@mariettachamber.com", "business.mariettachamber.com")
+    assert verify.directory_host("info@citychamber.org", "directory.citychamber.org")
 
 
 def test_foreign_domain_only_flags_other_organisations():

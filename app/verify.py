@@ -103,6 +103,34 @@ def foreign_domain(addr: str, business_host: str) -> bool:
     return _registrable(addr_domain) != _registrable(business_host)
 
 
+# Hosts that list other businesses: the page belongs to the directory, and the
+# address printed on it is the directory's own. `business.mariettachamber.com`
+# is not a chamber member's site — it is the chamber's page about a member.
+DIRECTORY_LABELS = {
+    "business", "businesses", "biz", "directory", "directories", "members",
+    "member", "listings", "listing", "find", "local", "places", "profiles",
+    "companies", "company", "search", "yellowpages", "chamber", "guide",
+}
+
+
+def directory_host(addr: str, business_host: str) -> bool:
+    """True when the prospect's 'site' is really a directory page for them.
+
+    The address domain is the directory's parent domain, so the org check
+    cannot see it — both hosts share an eTLD+1.
+    """
+    if "@" not in addr or not business_host:
+        return False
+    addr_domain = addr.lower().split("@", 1)[1].strip()
+    if addr_domain in FREEMAIL:
+        return False
+    host = business_host.lower().split("//")[-1].split("/")[0].split(":")[0].strip(".")
+    if host == addr_domain or not host.endswith("." + addr_domain):
+        return False
+    first = host.split(".")[0]
+    return first in DIRECTORY_LABELS
+
+
 def _doh(name: str, rtype: str) -> tuple[int | None, list[str]]:
     """Return (dns_status, answers). status None means "could not tell".
 
@@ -247,11 +275,17 @@ def verify_contact(conn, contact_id: str) -> dict[str, Any]:
     # would have gone to the chamber instead.
     host = (row["biz_domain"] or "") or (row["biz_site"] or "")
     host = host.split("//")[-1].split("/")[0].split(":")[0].lower()
-    if host and verdict.get("status") in {"verified", "risky"} and foreign_domain(row["email"], host):
-        verdict = dict(verdict)
-        verdict["status"] = "risky"
-        verdict["reason"] = "foreign_domain"
-        verdict["detail"] = {**verdict.get("detail", {}), "business_host": host}
+    if host and verdict.get("status") in {"verified", "risky"}:
+        if foreign_domain(row["email"], host):
+            verdict = dict(verdict)
+            verdict["status"] = "risky"
+            verdict["reason"] = "foreign_domain"
+            verdict["detail"] = {**verdict.get("detail", {}), "business_host": host}
+        elif directory_host(row["email"], host):
+            verdict = dict(verdict)
+            verdict["status"] = "risky"
+            verdict["reason"] = "directory_host"
+            verdict["detail"] = {**verdict.get("detail", {}), "business_host": host}
 
     return apply_verdict(conn, contact_id, verdict)
 
