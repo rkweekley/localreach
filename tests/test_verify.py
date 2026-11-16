@@ -59,6 +59,20 @@ def test_disposable_is_invalid(monkeypatch):
     assert res["status"] == "invalid" and res["reason"] == "disposable"
 
 
+def test_placeholder_addresses_never_verify(monkeypatch):
+    """`youremail@domain.com` came back verified on live data — the example
+    domains really do accept mail, so only a content check catches them."""
+    monkeypatch.setattr(verify, "_doh", LIVE)
+    for addr in ("youremail@domain.com", "yourname@company.com",
+                 "test@example.com", "someone@example.net"):
+        res = verify.verify_address(addr)
+        assert res["status"] == "invalid", addr
+        assert res["reason"] == "placeholder", addr
+    # A real prospect whose local part merely looks unusual still passes.
+    assert verify.verify_address("yoursolution@live-co.com")["status"] == "invalid"
+    assert verify.verify_address("sarahc@live-co.com")["status"] == "verified"
+
+
 def test_live_domain_verified_when_read_off_a_page(monkeypatch):
     monkeypatch.setattr(verify, "_doh", LIVE)
     res = verify.verify_address("tj@live-co.com", source="website")

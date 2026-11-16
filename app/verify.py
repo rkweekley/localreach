@@ -35,6 +35,34 @@ DISPOSABLE = {
 
 _SYNTAX = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
 
+# What a web page prints where a human would write their address, or the
+# example domains used in tutorials. These resolve in DNS, so MX lookups call
+# them deliverable — "youremail@domain.com" verified clean on live data
+# (2026-11-15). Sending there reaches a stranger, not the prospect.
+PLACEHOLDER_LOCAL = {
+    "youremail", "your.email", "yourname", "your.name", "your", "email",
+    "name", "firstname", "lastname", "user", "username", "test",
+    "example", "someone", "somebody", "nobody", "name.surname",
+}
+PLACEHOLDER_DOMAINS = {
+    "example.com", "example.net", "example.org", "domain.com", "yourdomain.com",
+    "mydomain.com", "test.com", "sample.com", "company.com", "website.com",
+    "yoursite.com", "site.com", "email.example",
+}
+PLACEHOLDER_PREFIXES = ("your", "test", "example", "sample", "dummy")
+
+
+def is_placeholder(addr: str) -> bool:
+    """True for template filler a scraper mistook for a contact address."""
+    if "@" not in addr:
+        return False
+    local, domain = addr.lower().split("@", 1)
+    if domain in PLACEHOLDER_DOMAINS:
+        return True
+    if local in PLACEHOLDER_LOCAL:
+        return True
+    return local.startswith(PLACEHOLDER_PREFIXES)
+
 # Statuses that may reach an inbox. `risky` is not one of them on purpose.
 SENDABLE = {"verified"}
 
@@ -105,6 +133,11 @@ def verify_address(email: str, source: str = "website") -> dict[str, Any]:
     detail: dict[str, Any] = {"source": source}
     if not _SYNTAX.match(addr):
         return {"status": "invalid", "reason": "bad_syntax", "detail": detail}
+
+    if is_placeholder(addr):
+        # Checked before DNS on purpose: the example domains are live, so an MX
+        # lookup would return verified and hand a template string to the sender.
+        return {"status": "invalid", "reason": "placeholder", "detail": detail}
 
     local, domain = addr.split("@", 1)
     detail["domain"] = domain
