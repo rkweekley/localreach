@@ -486,3 +486,45 @@ def test_a_lead_with_no_note_inherits_the_clients_first_touch_template(client):
     assert row["email_subject"] == template["subject"]
     assert "{{business_name}}" in row["email_body"], \
         "placeholders must survive to send time, where they fill from the lead"
+
+
+def test_the_same_company_re_proposed_without_its_domain_does_not_duplicate(client):
+    """A second run that names a known company but omits its URL must update, not add.
+
+    Observed live: "Discovery World on Market" landed twice for one client, once
+    with `domain='dwonmarket.org'` and once with an empty domain. The dedupe fell
+    back to a name match that also required an empty stored domain, so a lead the
+    agent re-proposed without its URL slipped past it and the list showed the same
+    company twice with two different first-touch drafts.
+    """
+    ws = _workspace(client, slug="direction-dedupe")
+    conn = connect()
+    try:
+        client_bid = _biz(conn, ws, CLIENT, "ridgeline-dedupe.example", research=CLIENT_SITE)
+        first = {"business_name": CLIENT, "leads": [{
+            "name": "Discovery World on Market", "domain": "dwonmarket.example",
+            "signal_kind": "expansion",
+            "signal_detail": "Broke ground on an addition",
+            "signal_source": "https://dwonmarket.example/news",
+        }]}
+        _store_research_leads(conn, ws, None, client_bid, first, None)
+
+        second = {"business_name": CLIENT, "leads": [{
+            "name": "Discovery World on Market", "domain": "",
+            "signal_kind": "expansion",
+            "signal_detail": "Addition pad poured in November",
+            "signal_source": "https://news.example/dwon",
+        }]}
+        _store_research_leads(conn, ws, None, client_bid, second, None)
+
+        rows = conn.execute(
+            "SELECT domain FROM research_leads WHERE workspace_id = ? "
+            "AND lower(name) = lower('Discovery World on Market')",
+            (ws,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(rows) == 1, f"one company, one lead — got {len(rows)} rows: {[r['domain'] for r in rows]}"
+    assert rows[0]["domain"] == "dwonmarket.example", \
+        "the update must keep the domain already learned for that company"

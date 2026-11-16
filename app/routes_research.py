@@ -664,10 +664,13 @@ def _store_research_leads(
             ).fetchone()
         if existing is None:
             # A lead with no site of its own still has to dedupe, or every run
-            # re-adds it and the list fills with the same company.
+            # re-adds it and the list fills with the same company. Match on name
+            # regardless of the stored domain: the agent sometimes re-proposes a
+            # known company without its URL, and a domain-only check let a second
+            # copy through (dup "Discovery World on Market", 2026-11-15).
             existing = conn.execute(
                 "SELECT id FROM research_leads WHERE client_business_id = ? "
-                "AND COALESCE(domain, '') = '' AND lower(name) = lower(?)",
+                "AND lower(name) = lower(?)",
                 (client_bid, name),
             ).fetchone()
         # The agent is asked to write the first touch for this specific company.
@@ -696,7 +699,8 @@ def _store_research_leads(
         if existing:
             conn.execute(
                 """UPDATE research_leads
-                      SET name = ?, domain = ?, why_now = ?, signal_kind = ?, signal_detail = ?,
+                      SET name = ?, domain = COALESCE(NULLIF(?, ''), domain), why_now = ?,
+                          signal_kind = ?, signal_detail = ?,
                           signal_source = ?, contact_hint = ?, fit = ?, business_id = COALESCE(?, business_id),
                           email_subject = COALESCE(?, email_subject),
                           email_body = COALESCE(?, email_body)
