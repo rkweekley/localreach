@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY db ./db
+COPY scripts ./scripts
 
 RUN useradd -m -u 10001 localreach \
     && mkdir -p /data /app/outbox \

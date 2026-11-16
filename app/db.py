@@ -123,8 +123,6 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider_id)")
         # Ownership lookups: the Leads view groups by client and the unassigned
         # bucket anti-joins on both columns, so both need an index.
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_client_leads_ws ON client_leads(workspace_id, client_business_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_client_leads_biz ON client_leads(business_id)")
         conn.commit()
     finally:
         conn.close()
