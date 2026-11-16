@@ -24,6 +24,7 @@ from . import (
     routes_ai,
     routes_campaigns,
     routes_data,
+    routes_leads,
     routes_research,
     routes_ui,
     routes_webhooks,
@@ -53,6 +54,7 @@ app.add_middleware(logging_setup.RequestContext)
 # Operator surface — every one of these routes is authenticated.
 _auth = [Depends(require_token)]
 app.include_router(routes_data.router, dependencies=_auth)
+app.include_router(routes_leads.router, dependencies=_auth)
 app.include_router(routes_campaigns.router, dependencies=_auth)
 app.include_router(routes_ai.router, dependencies=_auth)
 app.include_router(routes_research.router, dependencies=_auth)

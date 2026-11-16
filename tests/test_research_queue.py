@@ -51,6 +51,9 @@ def ws() -> str:
     yield rid
     conn = connect()
     try:
+        # client_leads carries the attribution for these leads and references
+        # research_leads, so it has to go first or the FK blocks the teardown.
+        conn.execute("DELETE FROM client_leads WHERE workspace_id = ?", (rid,))
         conn.execute("DELETE FROM research_leads WHERE workspace_id = ?", (rid,))
         conn.execute("DELETE FROM research_queue WHERE workspace_id = ?", (rid,))
         conn.execute("DELETE FROM list_members WHERE list_id IN (SELECT id FROM lists WHERE workspace_id = ?)", (rid,))

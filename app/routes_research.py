@@ -26,7 +26,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from . import ai, audit, discover, research, verify
-from .db import connect, new_id, rows, utcnow
+from .db import connect, new_id, norm_company, rows, utcnow
 from .security import RateLimiter, client_ip
 
 log = logging.getLogger("localreach.research")
@@ -583,6 +583,24 @@ def _lead_domain(raw: str) -> str:
     return d[4:] if d.startswith("www.") else d
 
 
+def _business_by_name(conn, name: str) -> str | None:
+    """Find the business row for a company name, ignoring legal suffixes.
+
+    Only used when the domain did not match: `Acme Roofing LLC` and
+    `Acme Roofing, Inc.` are one company, and treating them as two is how the
+    same prospect ends up in the list twice. Compares in Python so the match is
+    exact on the normalised name rather than a fuzzy LIKE.
+    """
+    norm = norm_company(name)
+    if not norm:
+        return None
+    first = norm.split()[0]
+    for r in conn.execute("SELECT id, name FROM businesses WHERE name LIKE ?", (first + "%",)):
+        if norm_company(r["name"]) == norm:
+            return r["id"]
+    return None
+
+
 def _store_research_leads(
     conn,
     workspace_id: str,
@@ -646,14 +664,20 @@ def _store_research_leads(
             biz = conn.execute("SELECT id FROM businesses WHERE domain = ?", (domain,)).fetchone()
             if biz:
                 bid = biz["id"]
-        if not bid and domain:
+        if not bid:
+            # Domain is the strongest identity, but not the only one: the agent
+            # re-proposes known companies without their URL, and a lead with no
+            # site of its own still needs a business row or it can never be
+            # attributed, shown, or worked (9 such rows on 2026-11-15).
+            bid = _business_by_name(conn, name)
+        if not bid:
             bid = new_id()
             conn.execute(
                 """INSERT INTO businesses (id, name, website, domain, source, source_ref,
                                            fetched_at, created_at, updated_at)
                    VALUES (?,?,?,?, 'agent_lead', ?, ?, ?, ?)""",
-                (bid, name, f"https://{domain}", domain, client_name[:120], utcnow(),
-                 utcnow(), utcnow()),
+                (bid, name, f"https://{domain}" if domain else None, domain or None,
+                 client_name[:120], utcnow(), utcnow(), utcnow()),
             )
 
         existing = None
@@ -697,6 +721,7 @@ def _store_research_leads(
             subject or None, body or None,
         )
         if existing:
+            lead_id = existing["id"]
             conn.execute(
                 """UPDATE research_leads
                       SET name = ?, domain = COALESCE(NULLIF(?, ''), domain), why_now = ?,
@@ -705,19 +730,39 @@ def _store_research_leads(
                           email_subject = COALESCE(?, email_subject),
                           email_body = COALESCE(?, email_body)
                     WHERE id = ?""",
-                payload + (existing["id"],),
+                payload + (lead_id,),
             )
             updated += 1
         else:
+            lead_id = new_id()
             conn.execute(
                 """INSERT INTO research_leads (name, domain, why_now, signal_kind, signal_detail,
                                                signal_source, contact_hint, fit, business_id,
                                                email_subject, email_body,
                                                id, queue_id, workspace_id, client_business_id, created_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                payload + (new_id(), queue_id, workspace_id, client_bid, utcnow()),
+                payload + (lead_id, queue_id, workspace_id, client_bid, utcnow()),
             )
             created += 1
+
+        # Ownership is a row, not a list name: "which client is this lead for"
+        # has to survive renames, exports and a second client researching the
+        # same company. Insert-or-ignore keeps fit/status/notes an operator
+        # already set - research refreshes evidence, it does not reset the desk.
+        if bid:
+            conn.execute(
+                """INSERT OR IGNORE INTO client_leads
+                       (id, workspace_id, client_business_id, business_id, fit, status,
+                        origin, research_lead_id, created_at, updated_at)
+                   VALUES (?,?,?,?,?,'new','research',?,?,?)""",
+                (new_id(), workspace_id, client_bid, bid, fit, lead_id, utcnow(), utcnow()),
+            )
+            conn.execute(
+                "UPDATE client_leads SET fit = COALESCE(?, fit), research_lead_id = ?,"
+                " updated_at = ? WHERE client_business_id = ? AND business_id = ?"
+                "   AND status = 'new'",
+                (fit, lead_id, utcnow(), client_bid, bid),
+            )
 
         if lid and bid:
             conn.execute(

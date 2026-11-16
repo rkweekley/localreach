@@ -9,6 +9,7 @@ Concurrency notes that matter in production:
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -29,6 +30,20 @@ def utcnow() -> str:
 
 def new_id() -> str:
     return uuid.uuid4().hex
+
+
+# Company identity, used for dedupe only - display names are never rewritten.
+# "Acme Roofing LLC", "Acme Roofing, Inc." and "acme roofing" are one company;
+# treating them as three is how the same prospect lands in a list twice.
+_LEGAL_SUFFIXES = frozenset({
+    "llc", "lc", "inc", "incorporated", "co", "company", "corp", "corporation",
+    "ltd", "limited", "lp", "llp", "pllc", "pc", "plc", "dba",
+})
+
+
+def norm_company(name: str | None) -> str:
+    s = re.sub(r"[^a-z0-9\s]", " ", (name or "").lower())
+    return " ".join(t for t in s.split() if t not in _LEGAL_SUFFIXES)
 
 
 def connect() -> sqlite3.Connection:
@@ -106,6 +121,10 @@ def init_db() -> None:
         applied = _ensure_columns(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_enroll_due ON enrollments(status, next_send_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_provider ON messages(provider_id)")
+        # Ownership lookups: the Leads view groups by client and the unassigned
+        # bucket anti-joins on both columns, so both need an index.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_client_leads_ws ON client_leads(workspace_id, client_business_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_client_leads_biz ON client_leads(business_id)")
         conn.commit()
     finally:
         conn.close()

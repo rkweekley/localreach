@@ -289,3 +289,26 @@ CREATE TABLE IF NOT EXISTS tasks (
   completed_at  TEXT,
   created_at    TEXT NOT NULL
 );
+
+-- Who a prospect is a lead FOR. One row per (client, prospect) pair, because the
+-- same company can be a legitimate prospect for two clients (a bank needs both site
+-- work and managed IT) while staying a single business row so its contacts and
+-- suppression list do not fork. `businesses` stays a pure company registry:
+-- ownership lives here, never in a list name or in `source_ref`.
+CREATE TABLE IF NOT EXISTS client_leads (
+  id                 TEXT PRIMARY KEY,
+  workspace_id       TEXT NOT NULL REFERENCES workspaces(id),
+  client_business_id TEXT NOT NULL REFERENCES businesses(id),  -- who the outreach is for
+  business_id        TEXT NOT NULL REFERENCES businesses(id),  -- the prospect
+  fit                INTEGER,                                  -- 0-100 fit against THIS client
+  status             TEXT NOT NULL DEFAULT 'new',              -- new | contacted | replied | meeting | won | lost | unfit
+  origin             TEXT NOT NULL,                            -- research | import | manual | csv
+  research_lead_id   TEXT REFERENCES research_leads(id),       -- the evidence this came from
+  assigned_by        TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  UNIQUE (client_business_id, business_id)
+);
+CREATE INDEX IF NOT EXISTS idx_clead_client ON client_leads (client_business_id, status);
+CREATE INDEX IF NOT EXISTS idx_clead_business ON client_leads (business_id);
+CREATE INDEX IF NOT EXISTS idx_clead_ws ON client_leads (workspace_id, created_at);

@@ -389,18 +389,18 @@ function skipNote(skipped) {
 /* ---------------- leads ---------------- */
 async function viewLeads(v) {
   v.innerHTML =
-    '<div class="h"><div><h2>Leads</h2><p>Local businesses with provenance. Scored, deduped, suppression-aware.</p></div>' +
+    '<div class="h"><div><h2>Leads</h2><p>Every prospect, grouped by the client it is a lead for.</p></div>' +
       '<button class="btn" id="btnImport">Import CSV</button></div>' +
     '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
-      '<div class="form-grid">' +
-        '<div class="field"><label>Category</label><input id="fCat" placeholder="e.g. roofing"></div>' +
-        '<div class="field"><label>City</label><input id="fCity" placeholder="e.g. Columbus"></div>' +
-        '<div class="field"><label>State</label><input id="fState" placeholder="OH" maxlength="2"></div>' +
-        '<div class="field"><label>Min fit</label><input id="fFit" type="number" min="0" max="100" value="0"></div>' +
-        '<div class="field"><label>Min reviews</label><input id="fRev" type="number" min="0" value="0"></div>' +
-      '</div>' +
-      '<div class="row"><button class="btn sm" id="btnSearch">Search</button>' +
-        '<label class="row muted" style="gap:6px;font-size:12.5px"><input type="checkbox" class="check" id="fVerified" style="width:15px"> verified email only</label>' +
+      '<div class="row" id="leadTabs" style="flex-wrap:wrap;margin-bottom:10px"></div>' +
+      '<div class="row">' +
+        '<input id="fQ" placeholder="Search prospect or domain" style="flex:1;min-width:180px">' +
+        '<select id="fBucket" style="width:auto">' +
+          '<option value="all">All leads</option>' +
+          '<option value="sendable">Verified email</option>' +
+          '<option value="no_email">No email yet</option>' +
+        "</select>" +
+        '<button class="btn sm" id="btnSearch">Search</button>' +
         '<span class="muted" id="leadCount"></span></div>' +
     "</div></div>" +
     '<div class="panel"><div class="action-bar">' +
@@ -409,13 +409,15 @@ async function viewLeads(v) {
       '<button class="btn ghost sm" id="btnScore" disabled>Score selected</button>' +
       '<button class="btn ghost sm" id="btnList" disabled>Save as list</button>' +
       '<button class="btn sm" id="btnEnroll" disabled>Enroll in sequence</button>' +
-    '</div><div id="leadTable"><div class="empty">Search to see leads.</div></div></div>';
+    '</div><div id="leadTable"><div class="empty">Loading leads…</div></div></div>';
 
   $("#btnSearch").onclick = () => loadLeads();
   $("#btnImport").onclick = importModal;
   $("#btnScore").onclick = scoreSelected;
   $("#btnList").onclick = saveList;
   $("#btnEnroll").onclick = enrollSelected;
+  $("#fQ").onkeydown = (e) => { if (e.key === "Enter") loadLeads(); };
+  $("#fBucket").onchange = () => loadLeads();
   $("#leadTable").addEventListener("change", (e) => {
     const cb = e.target.closest("input[data-bid]");
     if (!cb) return;
@@ -423,8 +425,10 @@ async function viewLeads(v) {
     syncSel();
   });
   $("#leadTable").addEventListener("click", (e) => {
-    const row = e.target.closest("tr[data-row]");
-    if (row && !e.target.closest("input")) leadModal(row.dataset.row);
+    const asg = e.target.closest("button[data-assign]");
+    if (asg) { e.stopPropagation(); return assignModal(asg.dataset.assign); }
+    const row = e.target.closest("tr[data-lid]");
+    if (row && !e.target.closest("input")) leadModal(row.dataset.lid);
   });
   await loadLeads();
 }
@@ -436,44 +440,119 @@ function syncSel() {
 }
 
 async function loadLeads() {
-  const params = {
-    workspace_id: state.ws,
-    category: $("#fCat").value.trim(),
-    city: $("#fCity").value.trim(),
-    state: $("#fState").value.trim().toUpperCase(),
-    min_fit: Number($("#fFit").value || 0),
-    min_reviews: Number($("#fRev").value || 0),
-    verified_email_only: $("#fVerified").checked,
-    limit: 200,
-  };
+  const params = {workspace_id: state.ws, limit: 300};
+  const bucket = ($("#fBucket") && $("#fBucket").value) || "all";
+  if (state.leadClient === "__unassigned__") params.bucket = "unassigned";
+  else {
+    if (state.leadClient) params.client_business_id = state.leadClient;
+    if (bucket !== "all") params.bucket = bucket;
+  }
+  const text = ($("#fQ") && $("#fQ").value.trim()) || "";
+  if (text) params.q = text;
   try {
-    const d = await api("/api/search?" + q(params));
-    state.leads = d.results || [];
-    $("#leadCount").textContent = state.leads.length + " result" + (state.leads.length === 1 ? "" : "s");
+    const d = await api("/api/leads?" + q(params));
+    state.leads = d.items || [];
+    state.leadClients = d.clients || [];
+    state.unassignedCount = d.unassigned_count || 0;
+    $("#leadCount").textContent = state.leads.length + " shown";
     renderLeads();
   } catch (err) { toast(err.message, "bad"); }
 }
 
 function renderLeads() {
+  const tabs = $("#leadTabs");
+  if (tabs) {
+    const chip = (label, count, active, val) =>
+      '<button class="btn ghost sm" data-cl="' + esc(val) + '"' +
+        (active ? ' style="border-color:var(--accent);color:var(--accent)"' : "") + ">" +
+        esc(label) + ' <span class="muted">' + count + "</span></button>";
+    const total = (state.leadClients || []).reduce((n, c) => n + (c.leads || 0), 0);
+    tabs.innerHTML = chip("All", total, !state.leadClient, "") +
+      (state.leadClients || []).map((c) => chip(c.name, c.leads || 0, state.leadClient === c.id, c.id)).join("") +
+      chip("Unassigned", state.unassignedCount || 0, state.leadClient === "__unassigned__", "__unassigned__");
+    tabs.querySelectorAll("button[data-cl]").forEach((b) => {
+      b.onclick = () => { state.leadClient = b.dataset.cl || null; loadLeads(); };
+    });
+  }
+
   const host = $("#leadTable");
-  if (!state.leads.length) { host.innerHTML = '<div class="empty">No matches. Widen the filters or import leads.</div>'; return; }
-  host.innerHTML = '<table><thead><tr><th style="width:28px"></th><th>Business</th><th>Category</th><th>Reviews</th>' +
-    '<th>Contact</th><th>Fit</th></tr></thead><tbody>' +
-    state.leads.map((b) => {
-      const fit = b.fit_score;
-      const cls = fit == null ? "lo" : fit >= 70 ? "hi" : fit >= 45 ? "mid" : "lo";
-      const email = b.email
-        ? '<div class="mono">' + esc(b.email) + "</div>" + (b.suppressed ? ' <span class="pill bad">suppressed</span>' : "")
-        : '<span class="muted">no email</span>';
-      return '<tr data-row="' + esc(b.id) + '"><td><input type="checkbox" class="check" data-bid="' + esc(b.id) + '"' +
-        (state.selected.has(b.id) ? " checked" : "") + "></td>" +
-        '<td><div class="strong">' + esc(b.name) + '</div><div class="muted" style="font-size:12px">' +
-          esc([b.city, b.state].filter(Boolean).join(", ") || "—") + "</div></td>" +
-        '<td class="muted">' + esc(b.category || "—") + "</td>" +
-        '<td><span class="mono">' + nfmt(b.review_count) + '</span> <span class="muted">· ' + (b.rating ? esc(b.rating) + "★" : "—") + "</span></td>" +
-        '<td>' + email + (b.email_status ? ' <span class="pill ' + (b.email_status === "verified" ? "ok" : "info") + '">' + esc(b.email_status) + "</span>" : "") + "</td>" +
-        '<td><span class="fit ' + cls + '">' + (fit == null ? "—" : fit) + "</span></td></tr>";
-    }).join("") + "</tbody></table>";
+  if (!state.leads.length) { host.innerHTML = '<div class="empty">No leads in this view.</div>'; return; }
+
+  // Grouped by client, because "which of my clients is this lead for" is the
+  // question this screen exists to answer. Unassigned sits last and is labelled
+  // as unfinished work, not as a client called Unassigned.
+  const groups = [];
+  state.leads.forEach((r) => {
+    const key = r.client_name || "Unassigned";
+    let g = groups.find((x) => x.key === key);
+    if (!g) { g = { key, rows: [] }; groups.push(g); }
+    g.rows.push(r);
+  });
+
+  let html = '<table><thead><tr><th style="width:26px"></th><th>Prospect</th>' +
+    '<th>Signal / why now</th><th style="width:56px">Fit</th><th>Contact</th>' +
+    '<th style="width:92px">First touch</th></tr></thead><tbody>';
+  groups.forEach((g) => {
+    const head = g.key === "Unassigned"
+      ? "Unassigned · choose the client before outreach"
+      : "Leads for " + esc(g.key);
+    html += '<tr><td colspan="6" style="background:var(--panel-2);font-size:11.5px;' +
+      'letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding:7px 10px">' +
+      head + " · " + g.rows.length + "</td></tr>";
+    g.rows.forEach((r) => { html += leadRow(r); });
+  });
+  host.innerHTML = html + "</tbody></table>";
+}
+
+function leadRow(r) {
+  const fit = r.fit;
+  const cls = fit == null ? "lo" : fit >= 70 ? "hi" : fit >= 45 ? "mid" : "lo";
+  const email = r.email
+    ? '<div class="mono" style="font-size:12px">' + esc(r.email) + "</div>" +
+      (r.email_status
+        ? '<span class="pill ' + (r.email_status === "verified" ? "ok" : r.email_status === "invalid" ? "bad" : "info") + '">' +
+          esc(r.email_status) + "</span>"
+        : "")
+    : '<span class="muted">' + (r.contact_hint ? esc(r.contact_hint) : "no email yet") + "</span>";
+  const why = r.why_now
+    ? esc(r.why_now.length > 160 ? r.why_now.slice(0, 157) + "…" : r.why_now)
+    : '<span class="muted">no signal recorded</span>';
+  const kind = r.signal_kind ? '<span class="pill info">' + esc(String(r.signal_kind).replace(/_/g, " ")) + "</span> " : "";
+  const first = r.has_first_touch ? '<span class="pill ok">drafted</span>' : '<span class="muted">—</span>';
+  const assign = r.status === "unassigned"
+    ? '<div style="margin-top:3px"><button class="btn ghost sm" data-assign="' + esc(r.business_id) + '">Assign…</button></div>'
+    : "";
+  return '<tr data-lid="' + esc(r.id || ("unassigned:" + r.business_id)) + '">' +
+    '<td><input type="checkbox" class="check" data-bid="' + esc(r.business_id) + '"' +
+      (state.selected.has(r.business_id) ? " checked" : "") + "></td>" +
+    '<td><div class="strong">' + esc(r.name) + '</div><div class="muted" style="font-size:12px">' +
+      esc([r.city, r.state].filter(Boolean).join(", ") || r.domain || "—") + "</div>" + assign + "</td>" +
+    '<td><div style="font-size:12.5px">' + kind + why + "</div></td>" +
+    '<td><span class="fit ' + cls + '">' + (fit == null ? "—" : fit) + "</span></td>" +
+    "<td>" + email + "</td>" +
+    "<td>" + first + "</td></tr>";
+}
+
+function assignModal(businessId) {
+  const clients = state.leadClients || [];
+  const row = state.leads.find((x) => x.business_id === businessId) || {};
+  if (!clients.length) return toast("No client businesses on file yet", "bad");
+  openModal("Whose lead is " + (row.name || "this prospect") + "?",
+    '<p class="muted" style="font-size:12.5px;margin-top:0">Outreach is written and signed as the client you pick here. ' +
+    "A prospect can be a lead for more than one client.</p>" +
+    '<div class="field"><label>Client</label><select id="assignClient">' +
+      clients.map((c) => '<option value="' + esc(c.id) + '">' + esc(c.name) +
+        (c.domain ? " · " + esc(c.domain) : "") + "</option>").join("") +
+    "</select></div>",
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doAssign">Assign</button>');
+  $("#doAssign").onclick = async () => {
+    try {
+      await api("/api/leads/assign", {method: "POST", body: JSON.stringify({
+        workspace_id: state.ws, business_id: businessId,
+        client_business_id: $("#assignClient").value})});
+      closeModal(); toast("Assigned", "ok"); await loadLeads();
+    } catch (err) { toast(err.message, "bad"); }
+  };
 }
 
 async function scoreSelected() {
@@ -569,18 +648,31 @@ function parseCsv(text) {
 }
 
 async function leadModal(id) {
-  const b = state.leads.find((x) => x.id === id);
-  if (!b) return;
-  let factors = b.factors;
-  try { factors = factors ? JSON.parse(factors) : null; } catch {}
-  openModal(b.name,
+  const r = state.leads.find((x) => (x.id || ("unassigned:" + x.business_id)) === id);
+  if (!r) return;
+  const fit = r.fit == null ? "—" : String(r.fit);
+  const hasTouch = r.has_first_touch && (r.first_touch_subject || r.first_touch_body);
+  const touch = hasTouch
+    ? '<div style="margin-top:12px"><div class="k muted" style="font-size:12px;margin-bottom:6px">First touch · sent as ' +
+        esc(r.client_name || "unassigned") + "</div>" +
+      '<div style="margin-bottom:6px"><strong>' + esc(r.first_touch_subject || "(no subject)") + "</strong></div>" +
+      '<pre style="white-space:pre-wrap;font-size:12.5px">' + esc(r.first_touch_body || "") + "</pre></div>"
+    : '<div style="margin-top:12px" class="muted">No first touch drafted yet for this lead.</div>';
+  openModal(r.name,
     '<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">' +
-      info("Fit score", b.fit_score ?? "—") + info("Demand", b.demand_score ?? "—") +
-      info("Reach", b.reach_score ?? "—") + info("Category", b.category || "—") +
-      info("Phone", b.phone || "—") + info("Website", b.website || "—") +
-      info("Address", [b.address1, b.city, b.state, b.postal_code].filter(Boolean).join(", ") || "—") +
-      info("Source", b.source || "—") + info("Contact", b.contact_name || "—") + info("Email status", b.email_status || "—") +
-    "</div>" + (factors ? '<div style="margin-top:12px"><div class="k muted" style="font-size:12px;margin-bottom:6px">Score factors</div><pre>' + esc(JSON.stringify(factors, null, 2)) + "</pre></div>" : ""),
+      info("Lead for", r.client_name || "Unassigned") +
+      info("Fit", fit) +
+      info("Status", r.status || "—") +
+      info("Signal", String(r.signal_kind || "—").replace(/_/g, " ")) +
+      info("Contact", r.email || r.contact_hint || "—") +
+      info("Email status", r.email_status || "not checked") +
+      info("City", [r.city, r.state].filter(Boolean).join(", ") || "—") +
+      info("Website", r.domain || "—") +
+    "</div>" +
+    (r.why_now ? '<div style="margin-top:12px"><div class="k muted" style="font-size:12px;margin-bottom:4px">Why now</div><div>' +
+      esc(r.why_now) + "</div></div>" : "") +
+    (r.signal_source ? '<div class="muted" style="font-size:12px;margin-top:6px">Evidence: ' + esc(r.signal_source) + "</div>" : "") +
+    touch,
     '<button class="btn ghost sm" data-close>Close</button>');
 }
 const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="k">' + esc(k) + '</div><div style="margin-top:4px">' + esc(v) + "</div></div>";
