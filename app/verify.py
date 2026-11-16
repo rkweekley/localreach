@@ -66,6 +66,42 @@ def is_placeholder(addr: str) -> bool:
 # Statuses that may reach an inbox. `risky` is not one of them on purpose.
 SENDABLE = {"verified"}
 
+# Free mailboxes: a small business that runs on Gmail is still the business.
+# Any OTHER foreign domain means the address belongs to a different
+# organisation — typically the directory that listed the prospect.
+FREEMAIL = {
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "hotmail.com",
+    "outlook.com", "live.com", "msn.com", "aol.com", "icloud.com", "me.com",
+    "proton.me", "protonmail.com", "comcast.net", "att.net", "verizon.net",
+    "sbcglobal.net", "mail.com", "gmx.com", "zoho.com", "yandex.com",
+}
+
+
+def _registrable(host: str) -> str:
+    """Rough eTLD+1: the last two labels, or three for two-part public suffixes.
+
+    Exactness is not the point — this only has to decide whether two hosts
+    belong to the same organisation (business.mariettachamber.com vs
+    mariettachamber.com), and guessing high is the safe direction.
+    """
+    labels = [p for p in (host or "").lower().split(".") if p]
+    if len(labels) <= 2:
+        return ".".join(labels)
+    two_part = {"co", "com", "net", "org", "ac", "gov", "edu"}
+    if labels[-2] in two_part and len(labels[-1]) == 2:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def foreign_domain(addr: str, business_host: str) -> bool:
+    """True when `addr` belongs to an organisation other than `business_host`."""
+    if "@" not in addr or not business_host:
+        return False
+    addr_domain = addr.lower().split("@", 1)[1].strip()
+    if addr_domain in FREEMAIL:
+        return False
+    return _registrable(addr_domain) != _registrable(business_host)
+
 
 def _doh(name: str, rtype: str) -> tuple[int | None, list[str]]:
     """Return (dns_status, answers). status None means "could not tell".
@@ -192,12 +228,31 @@ def apply_verdict(conn, contact_id: str, verdict: dict[str, Any]) -> dict[str, A
 
 
 def verify_contact(conn, contact_id: str) -> dict[str, Any]:
-    row = conn.execute("SELECT id, email, email_source FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    row = conn.execute(
+        "SELECT c.id, c.email, c.email_source, c.business_id, "
+        "       b.domain AS biz_domain, b.website AS biz_site "
+        "  FROM contacts c LEFT JOIN businesses b ON b.id = c.business_id "
+        " WHERE c.id = ?",
+        (contact_id,),
+    ).fetchone()
     if not row:
         return {"updated": False, "reason": "not_found"}
     if not (row["email"] or "").strip():
         return {"updated": False, "reason": "no_email"}
     verdict = verify_address(row["email"], source=(row["email_source"] or "website"))
+
+    # A deliverable mailbox is not the same as the prospect's mailbox. Directory
+    # listings (business.mariettachamber.com) print the host's own address, so
+    # the scrape attributed the chamber's info@ to the prospect and the send
+    # would have gone to the chamber instead.
+    host = (row["biz_domain"] or "") or (row["biz_site"] or "")
+    host = host.split("//")[-1].split("/")[0].split(":")[0].lower()
+    if host and verdict.get("status") in {"verified", "risky"} and foreign_domain(row["email"], host):
+        verdict = dict(verdict)
+        verdict["status"] = "risky"
+        verdict["reason"] = "foreign_domain"
+        verdict["detail"] = {**verdict.get("detail", {}), "business_host": host}
+
     return apply_verdict(conn, contact_id, verdict)
 
 

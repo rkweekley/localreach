@@ -182,6 +182,36 @@ def _seed_contact(email: str, source: str = "website") -> tuple[str, str]:
         conn.close()
 
 
+def test_a_directory_listing_does_not_donate_its_own_address(monkeypatch):
+    """business.mariettachamber.com printed info@mariettachamber.com, and the
+    scraper recorded it as the listed prospect's contact. The mailbox is real,
+    so DNS said verified — but a send would go to the chamber, not the prospect.
+    """
+    monkeypatch.setattr(verify, "_doh", LIVE)
+    _, cid = _seed_contact("info@live-co.com")
+    conn = connect()
+    try:
+        conn.execute("UPDATE businesses SET domain = 'business.mariettachamber.com' "
+                     "WHERE id = (SELECT business_id FROM contacts WHERE id = ?)", (cid,))
+        conn.commit()
+        res = verify.verify_contact(conn, cid)
+        conn.commit()
+    finally:
+        conn.close()
+    assert res["email_status"] == "risky", res
+    assert res["reason"] == "foreign_domain"
+
+
+def test_foreign_domain_only_flags_other_organisations():
+    assert verify.foreign_domain("info@otherchamber.org", "business.mariettachamber.com")
+    assert verify.foreign_domain("owner@rival.com", "mydomain.com")
+    # Own subdomain, own host, and free mailboxes all stay with the business.
+    assert not verify.foreign_domain("info@mail.mydomain.com", "mydomain.com")
+    assert not verify.foreign_domain("info@mydomain.com", "www.mydomain.com")
+    assert not verify.foreign_domain("ridgelinedig@gmail.com", "ridgelineexcavationohio.com")
+    assert not verify.foreign_domain("info@prospect.co.uk", "www.prospect.co.uk")
+
+
 def test_apply_verdict_writes_status_and_evidence(monkeypatch):
     monkeypatch.setattr(verify, "_doh", LIVE)
     _, cid = _seed_contact("owner@live-co.com")
