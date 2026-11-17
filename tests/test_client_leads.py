@@ -44,12 +44,19 @@ def _teardown():
         biz_ids = tuple(_CLEAN["biz"]) or ("",)
         marks = ",".join("?" * len(ws_ids))
         bmarks = ",".join("?" * len(biz_ids))
+        conn.execute(f"DELETE FROM workspace_businesses WHERE workspace_id IN ({marks})", ws_ids)
+        conn.execute(f"DELETE FROM workspace_businesses WHERE business_id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM client_leads WHERE workspace_id IN ({marks})", ws_ids)
         conn.execute(f"DELETE FROM workspace_clients WHERE workspace_id IN ({marks})", ws_ids)
         conn.execute(f"DELETE FROM client_leads WHERE business_id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM client_leads WHERE client_business_id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM research_leads WHERE workspace_id IN ({marks})", ws_ids)
+        conn.execute(
+            f"DELETE FROM list_members WHERE list_id IN "
+            f"(SELECT id FROM lists WHERE workspace_id IN ({marks}))", ws_ids)
+        conn.execute(f"DELETE FROM lists WHERE workspace_id IN ({marks})", ws_ids)
         conn.execute(f"DELETE FROM contacts WHERE business_id IN ({bmarks})", biz_ids)
+        conn.execute(f"DELETE FROM scores WHERE business_id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM businesses WHERE id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM workspaces WHERE id IN ({marks})", ws_ids)
         conn.commit()
@@ -133,6 +140,16 @@ def _owner(conn, ws, client_bid, business_id, fit=75, status="new", origin="rese
     return lid
 
 
+def _pool(conn, ws, business_id, origin="import"):
+    """Record that this workspace brought the prospect in."""
+    conn.execute(
+        """INSERT OR IGNORE INTO workspace_businesses (workspace_id, business_id, origin, created_at)
+           VALUES (?,?,?,?)""",
+        (ws, business_id, origin, utcnow()),
+    )
+    return business_id
+
+
 def _setup(conn, client, slug="client-leads-test"):
     """A workspace with one client, two prospects, and one orphan."""
     ws = _workspace(client, slug)
@@ -142,6 +159,9 @@ def _setup(conn, client, slug="client-leads-test"):
     p1 = _biz(conn, "Promanco Builders", f"promanco-{slug}.test")
     p2 = _biz(conn, "Ohio Valley Grading", f"ovg-{slug}.test")
     orphan = _biz(conn, f"Nobody Owns Me {slug}", None)
+    # Prospects belong to the workspace that imported or researched them.
+    for bid in (p1, p2, orphan):
+        _pool(conn, ws, bid, origin="research")
     _contact(conn, p1, f"pm@{slug}.test", "verified")
     _contact(conn, p2, f"info@{slug}.test", "risky")
     conn.commit()
@@ -245,6 +265,165 @@ def test_client_tabs_do_not_leak_across_workspaces(client):
     names = {c["name"] for c in d["clients"]}
     assert "Ridgeline Excavation LLC" in names
     assert "Elsewhere Client" not in names
+
+
+def test_a_second_workspace_cannot_see_another_workspaces_prospects(client):
+    """Pool isolation, not just client isolation.
+
+    A new workspace used to open on the first workspace's imported prospects,
+    because "unassigned" meant "nobody claimed it anywhere" rather than "nobody
+    claimed it here". That is a data leak with an email button attached: the
+    second workspace could research, write to and send on behalf of prospects it
+    never imported.
+    """
+    conn = connect()
+    try:
+        owner_ws, cl, p1, _, orphan = _setup(conn, client, slug="cl-pool-owner")
+        other_ws = _workspace(client, "cl-pool-other")
+        conn.commit()
+    finally:
+        conn.close()
+
+    theirs = client.get("/api/leads", params={"workspace_id": other_ws,
+                                              "bucket": "unassigned"}).json()
+    ids = {r["business_id"] for r in theirs["items"]}
+    assert orphan not in ids
+    assert p1 not in ids
+    assert theirs["unassigned_count"] == 0
+
+    ours = client.get("/api/leads", params={"workspace_id": owner_ws,
+                                            "bucket": "unassigned"}).json()
+    assert orphan in {r["business_id"] for r in ours["items"]}
+
+
+def test_import_records_which_workspace_brought_the_prospect_in(client):
+    """The import seam is where ownership is established - otherwise the row is
+    invisible to everyone except a single-workspace install."""
+    ws = _workspace(client, "cl-pool-import")
+    r = client.post(
+        "/api/businesses/import",
+        params={"workspace_id": ws},
+        json=[{"name": "Hometown Roofing", "category": "roofing", "city": "Marietta",
+               "state": "OH", "website": "hometownroofing.test"}],
+    )
+    assert r.status_code < 300, r.text
+
+    listed = client.get("/api/leads", params={"workspace_id": ws,
+                                             "bucket": "unassigned"}).json()
+    names = {row["name"] for row in listed["items"]}
+    assert "Hometown Roofing" in names
+
+
+def test_scoring_writes_the_fit_the_operator_is_looking_at(client):
+    """Score selected used to toast and change nothing.
+
+    The number the Leads table renders is client_leads.fit (research_leads.fit for
+    attributed leads), while scoring wrote only to `scores`. Both had to be true
+    at once, so the score now lands on the row the screen reads.
+    """
+    conn = connect()
+    try:
+        ws, cl, p1, _, orphan = _setup(conn, client, slug="cl-score")
+        lid = _owner(conn, ws, cl, p1, fit=-1)  # sentinel: impossible real score
+        _contact(conn, orphan, "owner@cl-score.test", "verified")
+        conn.commit()
+    finally:
+        conn.close()
+
+    scored = client.post(
+        f"/api/businesses/{p1}/score",
+        json={"workspace_id": ws, "client_business_id": cl, "icp_categories": ["excavation"]},
+    )
+    assert scored.status_code < 300, scored.text
+    body = scored.json()
+    assert body["assigned_rows_updated"] == 1
+
+    conn = connect()
+    try:
+        row = conn.execute("SELECT fit FROM client_leads WHERE id = ?", (lid,)).fetchone()
+        persisted = conn.execute(
+            "SELECT fit_score FROM scores WHERE business_id = ?", (p1,)).fetchone()
+    finally:
+        conn.close()
+    assert row["fit"] == body["fit_score"] != -1
+    assert persisted["fit_score"] == body["fit_score"]
+
+    # And the screen reads it back on both buckets.
+    listed = client.get("/api/leads", params={"workspace_id": ws}).json()
+    mine = next(i for i in listed["items"] if i["business_id"] == p1)
+    assert mine["fit"] == body["fit_score"]
+
+    client.post(f"/api/businesses/{orphan}/score", json={"workspace_id": ws})
+    pool = client.get("/api/leads", params={"workspace_id": ws, "bucket": "unassigned"}).json()
+    unowned = next(i for i in pool["items"] if i["business_id"] == orphan)
+    assert unowned["fit"] is not None
+
+
+def test_scoring_refuses_to_rank_a_client_with_no_icp(client):
+    """A score against no target is a shuffle, not a ranking.
+
+    With an empty ICP every prospect landed on the 40-point base and a curated
+    fit was overwritten with a lower, meaningless number. The endpoint now says
+    what is missing instead of quietly degrading the list.
+    """
+    conn = connect()
+    try:
+        ws, cl, p1, _, _ = _setup(conn, client, slug="cl-no-icp")
+        lid = _owner(conn, ws, cl, p1, fit=88)
+        conn.execute("UPDATE businesses SET category = NULL WHERE id = ?", (p1,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    refused = client.post(
+        f"/api/businesses/{p1}/score",
+        json={"workspace_id": ws, "client_business_id": cl},
+    )
+    assert refused.status_code == 422, refused.text
+    assert "no categorised leads" in refused.json()["detail"].lower()
+
+    conn = connect()
+    try:
+        fit = conn.execute("SELECT fit FROM client_leads WHERE id = ?", (lid,)).fetchone()["fit"]
+    finally:
+        conn.close()
+    assert fit == 88, "a refused score must not touch the row the operator sees"
+
+
+def test_unassigned_scoring_uses_the_workspaces_own_targeting(client):
+    """Unassigned prospects are still measured against what this shop sells."""
+    conn = connect()
+    try:
+        ws, cl, p1, _, orphan = _setup(conn, client, slug="cl-pool-icp")
+        _owner(conn, ws, cl, p1)  # an existing categorised lead is the target
+        conn.execute("UPDATE businesses SET category = 'roofing' WHERE id = ?", (p1,))
+        conn.execute("UPDATE businesses SET category = 'roofing' WHERE id = ?", (orphan,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    scored = client.post(f"/api/businesses/{orphan}/score", json={"workspace_id": ws})
+    assert scored.status_code < 300, scored.text
+    assert scored.json()["factors"]["category_match"] == 25
+
+
+def test_every_score_carries_its_own_explanation(client):
+    """A bare number reads as a bug. The base is always a stated factor."""
+    conn = connect()
+    try:
+        ws, cl, p1, _, _ = _setup(conn, client, slug="cl-explain")
+        conn.execute("UPDATE businesses SET category = 'excavation' WHERE id = ?", (p1,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    scored = client.post(
+        f"/api/businesses/{p1}/score",
+        json={"workspace_id": ws, "client_business_id": cl, "icp_categories": ["excavation"]},
+    )
+    body = scored.json()
+    assert body["factors"]["base"] == 40
+    assert sum(body["factors"].values()) == body["fit_score"]
 
 
 def test_an_unowned_business_is_visible_not_dropped(client):
@@ -534,3 +713,42 @@ def test_filters_separate_mailable_leads_from_call_only_ones(client):
 
     hit = client.get("/api/leads", params={"workspace_id": ws, "q": "ovg"}).json()
     assert {r["name"] for r in hit["items"]} == {"Ohio Valley Grading"}
+
+
+def test_a_saved_list_can_be_read_back_and_filter_the_leads_screen(client):
+    """'Save as list' must not be a one-way write.
+
+    It used to be: the POST wrote `lists` and `list_members`, toasted, and the
+    list was unreadable forever after - no collection route, no filter, no way to
+    get back to the selection a marketer had just built. A saved list that
+    cannot be read is not a saved list.
+    """
+    conn = connect()
+    try:
+        ws, cl, p1, p2, _ = _setup(conn, client, slug="client-leads-lists")
+        _owner(conn, ws, cl, p1)
+        _owner(conn, ws, cl, p2)
+        conn.commit()
+    finally:
+        conn.close()
+    other = _workspace(client, slug="client-leads-lists-other")
+
+    made = client.post("/api/lists", json={
+        "workspace_id": ws, "name": "Q4 tier A", "business_ids": [p1]})
+    assert made.status_code < 300, made.text
+    lid = made.json()["id"]
+
+    rows = client.get("/api/lists", params={"workspace_id": ws}).json()
+    assert [r["id"] for r in rows] == [lid]
+    assert rows[0]["name"] == "Q4 tier A"
+    assert rows[0]["members"] == 1
+
+    # A list belongs to the workspace that saved it. Another tenant sees nothing.
+    assert client.get("/api/lists", params={"workspace_id": other}).json() == []
+
+    only = client.get("/api/leads", params={"workspace_id": ws, "list_id": lid}).json()
+    assert [r["business_id"] for r in only["items"]] == [p1]
+
+    # Filtering by someone else's list is a 404, never a peek at their prospects.
+    assert client.get("/api/leads", params={
+        "workspace_id": other, "list_id": lid}).status_code == 404

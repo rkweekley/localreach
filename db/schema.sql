@@ -346,3 +346,17 @@ CREATE TABLE IF NOT EXISTS workspace_clients (
   UNIQUE (workspace_id, business_id)
 );
 CREATE INDEX IF NOT EXISTS idx_wclient_ws ON workspace_clients (workspace_id, status);
+
+-- Which workspace brought a prospect in. `businesses` stays a pure company
+-- registry (one row per company, shared by every workspace), so import and
+-- research ownership lives here instead of on the registry row. Without this a
+-- second workspace sees the first workspace's imported prospects in its
+-- Unassigned bucket and can email them.
+CREATE TABLE IF NOT EXISTS workspace_businesses (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  business_id  TEXT NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  origin       TEXT NOT NULL DEFAULT 'import',  -- import | research | manual
+  created_at   TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, business_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wbusiness_biz ON workspace_businesses (business_id);

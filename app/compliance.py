@@ -161,7 +161,7 @@ def footer(workspace: dict, token: str) -> str:
     return (
         "\n\n--\n"
         f"{workspace['name']} · {workspace['physical_address']}\n"
-        f"Don't want to hear from me? One click and you're out: {base}/u/{token}\n"
+        f"Don't want to hear from me again? Unsubscribe here — no questions asked: {base}/u/{token}\n"
     )
 
 
@@ -191,5 +191,5 @@ def footer_for(sender_name: str, address: str, token: str, operator: str = "") -
     lines = ["", "", "--", who]
     if operator and operator != sender_name:
         lines.append(f"Sent on behalf of {sender_name} by {operator}.")
-    lines.append(f"Don't want to hear from me? One click and you're out: {base}/u/{token}")
+    lines.append(f"Don't want to hear from me again? Unsubscribe here — no questions asked: {base}/u/{token}")
     return "\n".join(lines) + "\n"

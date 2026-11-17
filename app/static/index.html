@@ -125,11 +125,20 @@
   .step-h .n{width:22px;height:22px;border-radius:6px;background:#1b2740;display:grid;place-items:center;
     font-size:11px;font-weight:700;color:#a9cdfb}
   @media (max-width:820px){
-    .shell{grid-template-columns:1fr;grid-template-rows:auto 1fr}
-    .rail{flex-direction:row;align-items:center;overflow-x:auto;padding:8px}
-    .rail .brand{padding:0 10px 0 4px}
-    .nav{flex-direction:row}
+    .shell{grid-template-columns:1fr;grid-template-rows:auto 1fr;min-width:0}
+    .rail{flex-direction:row;align-items:center;flex-wrap:wrap;overflow-x:visible;padding:8px;gap:6px}
+    .rail .brand{padding:0 6px 0 2px}
+    .nav{flex-direction:row;flex-wrap:wrap;width:100%;gap:4px}
+    .nav button{padding:7px 9px;font-size:12.5px}
     .rail-foot{display:none}
+    /* A phone gets a table that scrolls inside its own panel. Without this the
+       5-column lead table stretched the page to ~2x the viewport. max-width is
+       what makes it true: a block table with overflow-x:auto still grows to fit
+       its content, so it never scrolls - it just gets clipped by the panel. */
+    table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap;max-width:100%}
+    .panel,.content{min-width:0}
+    .h{flex-wrap:wrap;gap:8px}
+    .topbar{padding:10px 12px;flex-wrap:wrap}
   }
 </style>
 </head>
@@ -431,6 +440,7 @@ async function viewLeads(v) {
           '<option value="sendable">Verified email</option>' +
           '<option value="no_email">No email yet</option>' +
         "</select>" +
+        '<select id="fList" style="width:auto"><option value="">All lists</option></select>' +
         '<button class="btn sm" id="btnSearch">Search</button>' +
         '<button class="btn ghost sm" id="btnExport" title="Download every lead with its finished email, footer included">Export CSV</button>' +
         '<span class="muted" id="leadCount"></span></div>' +
@@ -451,6 +461,8 @@ async function viewLeads(v) {
   $("#btnEnroll").onclick = enrollSelected;
   $("#fQ").onkeydown = (e) => { if (e.key === "Enter") loadLeads(); };
   $("#fBucket").onchange = () => loadLeads();
+  $("#fList").onchange = () => loadLeads();
+  loadLists();
   $("#leadTable").addEventListener("change", (e) => {
     const cb = e.target.closest("input[data-bid]");
     if (!cb) return;
@@ -472,9 +484,26 @@ function syncSel() {
   ["btnScore", "btnList", "btnEnroll"].forEach((id) => { const b = $("#" + id); if (b) b.disabled = n === 0; });
 }
 
+async function loadLists() {
+  // Saved lists were write-only: the button toasted and the list was never
+  // readable again. They are a filter now, not a dead end.
+  const sel = $("#fList");
+  if (!sel) return;
+  try {
+    const rows = await api("/api/lists?workspace_id=" + encodeURIComponent(state.ws));
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">All lists</option>' +
+      rows.map((l) => '<option value="' + esc(l.id) + '">' + esc(l.name) +
+        " (" + (l.members || 0) + ")</option>").join("");
+    if (keep) sel.value = keep;
+  } catch (err) { /* a list filter is optional; do not block the leads view */ }
+}
+
 async function loadLeads() {
   const params = {workspace_id: state.ws, limit: 300};
   const bucket = ($("#fBucket") && $("#fBucket").value) || "all";
+  const listId = ($("#fList") && $("#fList").value) || "";
+  if (listId) params.list_id = listId;
   if (state.leadClient === "__unassigned__") params.bucket = "unassigned";
   else {
     if (state.leadClient) params.client_business_id = state.leadClient;
@@ -619,12 +648,41 @@ function addClientModal(thenAssignBusinessId) {
 
 async function scoreSelected() {
   const ids = [...state.selected];
-  let ok = 0;
-  try {
-    for (const id of ids) { await api("/api/businesses/" + encodeURIComponent(id) + "/score", {method: "POST", body: JSON.stringify({icp_categories: []})}); ok++; }
-    toast("Scored " + ok + " lead" + (ok === 1 ? "" : "s"), "ok");
-    await loadLeads(); syncSel();
-  } catch (err) { toast("Scored " + ok + ", then: " + err.message, "bad"); }
+  if (!ids.length) return toast("Select at least one lead", "bad");
+  // Fit answers "how well does this prospect fit this client", so the score has to
+  // know which client it is scoring for. Selection can span clients, so score each
+  // group separately; unassigned rows are scored without a client.
+  const byClient = new Map();
+  for (const id of ids) {
+    const row = state.leads.find((r) => r.business_id === id) || {};
+    const key = row.client_business_id || "";
+    if (!byClient.has(key)) byClient.set(key, []);
+    byClient.get(key).push(id);
+  }
+  let ok = 0, onLeads = 0, failed = 0, firstErr = "";
+  for (const [clientId, group] of byClient) {
+    for (const id of group) {
+      // One refusal (e.g. a client with no ICP) must not abandon the rest of the
+      // selection: count it, keep going, and report the reason once.
+      try {
+        const r = await api("/api/businesses/" + encodeURIComponent(id) + "/score",
+          {method: "POST", body: JSON.stringify({
+            icp_categories: [], workspace_id: state.ws, client_business_id: clientId || null})});
+        ok++;
+        if (r && r.assigned_rows_updated) onLeads++;
+      } catch (err) {
+        failed++;
+        if (!firstErr) firstErr = err.message;
+      }
+    }
+  }
+  if (failed) {
+    toast("Scored " + ok + ", " + failed + " could not be scored: " + firstErr, "bad");
+  } else {
+    toast("Scored " + ok + " lead" + (ok === 1 ? "" : "s") +
+      (onLeads < ok ? " · " + (ok - onLeads) + " unassigned, so Fit sits on the prospect" : ""), "ok");
+  }
+  await loadLeads(); syncSel();
 }
 
 function saveList() {
@@ -638,6 +696,7 @@ function saveList() {
     try {
       const r = await api("/api/lists", {method: "POST", body: JSON.stringify({workspace_id: state.ws, name, business_ids: [...state.selected]})});
       closeModal(); toast("Saved list with " + (r.members ?? state.selected.size) + " members", "ok");
+      loadLists();
     } catch (err) { toast(err.message, "bad"); }
   };
 }
@@ -667,15 +726,40 @@ function importModal() {
     '<p class="muted" style="font-size:12.5px;margin-top:0">Header row required. Recognised columns: ' +
     '<span class="mono">name, category, city, state, phone, website, contact_email, contact_name, title, rating, reviews</span></p>' +
     '<div class="field"><textarea id="csv" placeholder="name,category,city,state,phone,website,contact_email\nKessler Roofing,roofing,Columbus,OH,6145550100,kesslerroofing.com,owner@kesslerroofing.com" style="min-height:180px"></textarea></div>' +
+    '<div class="muted" id="csvSummary" style="font-size:12px">Paste a CSV to see what will be imported.</div>' +
     '<div class="err" id="csvErr"></div>',
     '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doImport">Import</button>');
+  // A silent drop is worse than a rejection: count what parsed, what did not, and
+  // how many prospects can actually be emailed, before anything is written.
+  const csvEl = $("#csv");
+  const preview = () => {
+    const text = csvEl.value.trim();
+    if (!text) {
+      $("#csvSummary").textContent = "Paste a CSV to see what will be imported.";
+      $("#doImport").disabled = true;
+      return;
+    }
+    const rows = parseCsv(text);
+    const raw = Math.max(0, text.split(/\r?\n/).filter((l) => l.trim()).length - 1);
+    const dropped = Math.max(0, raw - rows.length);
+    const withEmail = rows.filter((r) => r.contact_email).length;
+    $("#csvSummary").innerHTML = rows.length + " prospect" + (rows.length === 1 ? "" : "s") + " ready" +
+      (dropped ? ' · <span style="color:#e0a458">' + dropped + " row" + (dropped === 1 ? "" : "s") + " skipped (no name)</span>" : "") +
+      (rows.length ? " · " + withEmail + " with an email address" : "");
+    $("#doImport").disabled = !rows.length;
+  };
+  csvEl.addEventListener("input", preview);
+  preview();
   $("#doImport").onclick = async () => {
     const rows = parseCsv($("#csv").value);
     if (!rows.length) { $("#csvErr").textContent = "Nothing parsed — include a header row."; return; }
     try {
-      const r = await api("/api/businesses/import", {method: "POST", body: JSON.stringify(rows)});
+      const r = await api("/api/businesses/import?" + q({workspace_id: state.ws}),
+        {method: "POST", body: JSON.stringify(rows)});
       closeModal();
-      toast("Imported " + (r.created ?? 0) + ", updated " + (r.updated ?? 0), "ok");
+      const wsName = (state.workspaces.find((w) => w.id === state.ws) || {}).name || "this workspace";
+      toast("Imported " + (r.created ?? 0) + " new, updated " + (r.updated ?? 0) +
+        " — in Unassigned for " + wsName, "ok");
       await loadLeads();
     } catch (err) { $("#csvErr").textContent = err.message; }
   };
@@ -1450,10 +1534,13 @@ async function loadOutbox() {
   try {
     const d = await api("/api/messages?" + q({workspace_id: state.ws, limit: 100, direction: $("#obDir").value}));
     if (!d.results.length) { host.innerHTML = '<div class="empty">Nothing here yet. Enroll leads and run a tick.</div>'; return; }
-    host.innerHTML = '<table><thead><tr><th>To</th><th>Subject</th><th>Step</th><th>Status</th><th>Created</th></tr></thead><tbody>' +
+    host.innerHTML = '<table><thead><tr><th>To</th><th>Message</th><th>Step</th><th>Status</th><th>Created</th></tr></thead><tbody>' +
       d.results.map((m) => '<tr data-mid="' + esc(m.id) + '" style="cursor:pointer">' +
-        '<td><div class="strong">' + esc(m.business_name || m.contact_name || "—") + '</div><div class="mono muted">' + esc(m.to_email || "") + "</div></td>" +
-        '<td>' + esc(m.subject || "—") + "</td>" +
+        '<td><div class="strong">' + esc(m.business_name || m.contact_name || m.to_email || "—") + '</div><div class="mono muted" style="font-size:11.5px">' + esc(m.to_email || "no recipient") + "</div></td>" +
+        '<td><div class="strong">' + esc(m.subject || "(no subject)") + '</div>' +
+          '<div class="muted" style="font-size:12px">' +
+            esc((m.preview || "").replace(/\s+/g, " ").slice(0, 110) || "(empty body)") +
+            ((m.preview || "").length > 110 ? "…" : "") + "</div></td>" +
         '<td class="mono muted">' + (m.step_order ?? "—") + "</td>" +
         "<td>" + statusPill(m.provider_status, m.direction) + "</td>" +
         '<td class="muted">' + dt(m.created_at) + "</td></tr>").join("") +

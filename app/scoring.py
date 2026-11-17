@@ -43,7 +43,9 @@ def demand_for(category: str, state: str, city: str) -> int:
 
 
 def compute(business: dict, contact: dict | None, icp_categories: set[str] | None = None) -> dict:
-    factors: dict[str, int] = {}
+    # Every score starts from the same base, so it is the first line of the
+    # explanation. A bare 40 with no factors reads as a bug, not a verdict.
+    factors: dict[str, int] = {"base": 40}
 
     # ---- fit ----
     fit = 40

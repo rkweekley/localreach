@@ -34,7 +34,10 @@ STATUSES = {"new", "contacted", "replied", "meeting", "won", "lost", "unfit"}
 _SELECT = """
 SELECT cl.id, cl.client_business_id, cb.name AS client_name, cb.domain AS client_domain,
        cl.business_id, b.name, b.category, b.city, b.state, b.domain, b.website, b.phone,
-       COALESCE(cl.fit, rl.fit) AS fit, cl.status, cl.origin,
+       -- The operator scores a lead and expects this column to move. cl.fit is the
+       -- fit against this client; rl.fit is the research fit; s.fit_score is what
+       -- the last scoring run computed (unassigned/imported leads have no cl.fit).
+       COALESCE(cl.fit, rl.fit, s.fit_score) AS fit, cl.status, cl.origin,
        cl.research_lead_id, cl.assigned_by, cl.created_at,
        rl.why_now, rl.signal_kind, rl.signal_detail, rl.signal_source, rl.contact_hint,
        rl.audit_score, rl.email_subject AS first_touch_subject, rl.email_body AS first_touch_body,
@@ -45,6 +48,7 @@ SELECT cl.id, cl.client_business_id, cb.name AS client_name, cb.domain AS client
   JOIN businesses cb ON cb.id = cl.client_business_id
   JOIN businesses b  ON b.id  = cl.business_id
   LEFT JOIN research_leads rl ON rl.id = cl.research_lead_id
+  LEFT JOIN scores s ON s.business_id = cl.business_id
   LEFT JOIN contacts ct ON ct.business_id = b.id AND ct.is_primary = 1
  WHERE cl.workspace_id = ?
 """
@@ -55,7 +59,7 @@ SELECT cl.id, cl.client_business_id, cb.name AS client_name, cb.domain AS client
 _UNASSIGNED = """
 SELECT NULL AS id, NULL AS client_business_id, NULL AS client_name, NULL AS client_domain,
        b.id AS business_id, b.name, b.category, b.city, b.state, b.domain, b.website, b.phone,
-       NULL AS fit, 'unassigned' AS status, b.source AS origin,
+       s.fit_score AS fit, 'unassigned' AS status, b.source AS origin,
        NULL AS research_lead_id, NULL AS assigned_by, b.created_at,
        NULL AS why_now, NULL AS signal_kind, NULL AS signal_detail, NULL AS signal_source,
        NULL AS contact_hint, NULL AS audit_score,
@@ -63,11 +67,24 @@ SELECT NULL AS id, NULL AS client_business_id, NULL AS client_name, NULL AS clie
        ct.email, ct.email_status, ct.full_name AS contact_name, 0 AS has_first_touch
   FROM businesses b
   LEFT JOIN contacts ct ON ct.business_id = b.id AND ct.is_primary = 1
+  LEFT JOIN scores s ON s.business_id = b.id
  WHERE b.id NOT IN (SELECT business_id FROM client_leads)
    AND b.id NOT IN (SELECT client_business_id FROM client_leads)
    AND b.id NOT IN (SELECT business_id FROM workspace_clients)
    AND b.id NOT IN (SELECT client_business_id FROM research_leads
                      WHERE client_business_id IS NOT NULL)
+   -- A prospect belongs to the workspace that imported or researched it. Without
+   -- this, a second workspace sees the first workspace's imports and can email
+   -- them. Rows claimed by nobody stay visible only on a single-workspace
+   -- install, which is what a pre-pool database looks like.
+   AND (
+     EXISTS (SELECT 1 FROM workspace_businesses wb
+              WHERE wb.business_id = b.id AND wb.workspace_id = ?)
+     OR (
+       NOT EXISTS (SELECT 1 FROM workspace_businesses wb2 WHERE wb2.business_id = b.id)
+       AND (SELECT COUNT(*) FROM workspaces) = 1
+     )
+   )
 """
 
 
@@ -113,18 +130,30 @@ def list_leads(
     client_business_id: str | None = None,
     bucket: str = "all",
     q: str | None = None,
+    list_id: str | None = None,
     limit: int = 300,
 ) -> dict:
     conn = connect()
     try:
         items: list[dict[str, Any]]
         if bucket == "unassigned":
-            items = [dict(r) for r in conn.execute(_UNASSIGNED + " ORDER BY b.name LIMIT ?", (limit,))]
+            items = [dict(r) for r in conn.execute(
+                _UNASSIGNED + " ORDER BY b.name LIMIT ?", (workspace_id, limit))]
         else:
             sql, args = _SELECT, [workspace_id]
             if client_business_id:
                 sql += " AND cl.client_business_id = ?"
                 args.append(client_business_id)
+            if list_id:
+                # A saved list is only readable inside the workspace that owns
+                # it, or a list id would leak another tenant's prospects.
+                owner = conn.execute(
+                    "SELECT workspace_id FROM lists WHERE id = ?", (list_id,)).fetchone()
+                if not owner or owner["workspace_id"] != workspace_id:
+                    raise HTTPException(404, "no such list in this workspace")
+                sql += (" AND b.id IN (SELECT business_id FROM list_members"
+                        " WHERE list_id = ?)")
+                args.append(list_id)
             if q and q.strip():
                 like = f"%{q.strip()}%"
                 sql += " AND (b.name LIKE ? OR COALESCE(b.domain, '') LIKE ?)"
@@ -138,7 +167,8 @@ def list_leads(
             args.append(limit)
             items = [dict(r) for r in conn.execute(sql, args)]
 
-        unassigned = conn.execute("SELECT COUNT(*) AS n FROM (" + _UNASSIGNED + ")").fetchone()["n"]
+        unassigned = conn.execute(
+            "SELECT COUNT(*) AS n FROM (" + _UNASSIGNED + ")", (workspace_id,)).fetchone()["n"]
         return {
             "items": items,
             "count": len(items),

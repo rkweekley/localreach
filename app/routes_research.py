@@ -702,6 +702,16 @@ def _store_research_leads(
                  client_name[:120], utcnow(), utcnow(), utcnow()),
             )
 
+        # Research found this prospect for *this* workspace, so it belongs to this
+        # workspace's pool. Without the row it appears in every workspace's
+        # Unassigned bucket instead of only the one that paid for the research.
+        conn.execute(
+            """INSERT OR IGNORE INTO workspace_businesses
+                   (workspace_id, business_id, origin, created_at)
+               VALUES (?,?,'research',?)""",
+            (workspace_id, bid, utcnow()),
+        )
+
         existing = None
         if domain:
             existing = conn.execute(

@@ -197,6 +197,7 @@ def list_messages(workspace_id: str, limit: int = 50, direction: str | None = No
         data = rows(conn.execute(
             f"""SELECT m.id, m.direction, m.to_email, m.from_email, m.subject, m.provider_status,
                        m.step_order, m.created_at, m.sent_at, m.snippet_text,
+                       substr(COALESCE(m.body, ''), 1, 160) AS preview,
                        b.name AS business_name, c.full_name AS contact_name
                 FROM messages m
                 LEFT JOIN businesses b ON b.id = m.business_id

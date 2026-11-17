@@ -81,9 +81,11 @@ class BusinessIn(BaseModel):
 
 
 @router.post("/businesses/import")
-def import_businesses(items: list[BusinessIn]) -> dict:
+def import_businesses(items: list[BusinessIn], workspace_id: str | None = None) -> dict:
     """The ingestion seam. Whatever the data source (OSM, Places, CSV, licensed
-    provider), it lands here with provenance intact."""
+    provider), it lands here with provenance intact. When a workspace is named,
+    the prospect is also recorded as belonging to it - that is what keeps one
+    workspace's imports out of another workspace's Unassigned bucket."""
     conn = connect()
     created = updated = 0
     try:
@@ -122,6 +124,14 @@ def import_businesses(items: list[BusinessIn]) -> dict:
                      b.source_ref, utcnow(), b.license_note, utcnow(), utcnow()),
                 )
                 created += 1
+
+            if workspace_id:
+                conn.execute(
+                    """INSERT OR IGNORE INTO workspace_businesses
+                           (workspace_id, business_id, origin, created_at)
+                       VALUES (?,?,?,?)""",
+                    (workspace_id, bid, b.source or "import", utcnow()),
+                )
 
             if b.contact_email:
                 email = b.contact_email.lower()
@@ -201,6 +211,11 @@ def search(
 
 class ScoreIn(BaseModel):
     icp_categories: list[str] = []
+    # Scoring is a per-workspace act on a per-client relationship: the FIT column
+    # the operator is looking at is client_leads.fit. Passing the workspace (and
+    # optionally the client) lets the score land where the screen reads it.
+    workspace_id: str | None = None
+    client_business_id: str | None = None
 
 
 @router.post("/businesses/{business_id}/score")
@@ -213,7 +228,51 @@ def score_business(business_id: str, body: ScoreIn) -> dict:
         c = conn.execute(
             "SELECT * FROM contacts WHERE business_id = ? AND is_primary = 1", (business_id,)
         ).fetchone()
-        return scoring.compute(dict(b), dict(c) if c else None, set(body.icp_categories))
+
+        icp = set(body.icp_categories)
+        if not icp and body.client_business_id:
+            # No ICP was supplied, so derive one from the categories this client
+            # already has leads in. An empty ICP scores every prospect the same,
+            # which is what made "Score selected" look broken.
+            icp = {r["category"] for r in conn.execute(
+                """SELECT DISTINCT b2.category FROM client_leads cl
+                     JOIN businesses b2 ON b2.id = cl.business_id
+                    WHERE cl.client_business_id = ? AND b2.category IS NOT NULL""",
+                (body.client_business_id,),
+            )}
+            if not icp:
+                # Scoring against nothing is not a score, it is a shuffle: every
+                # prospect lands on the same base number and the operator loses the
+                # ranking they had. Refuse and say what is missing instead.
+                raise HTTPException(
+                    422,
+                    "No ICP for this client yet: it has no categorised leads. "
+                    "Set a category on at least one lead, or pass icp_categories.",
+                )
+        elif not icp and body.workspace_id:
+            # Unassigned prospects are scored on their own merits, but the bar they
+            # are measured against should still be the workspace's own targeting.
+            icp = {r["category"] for r in conn.execute(
+                """SELECT DISTINCT b2.category FROM client_leads cl
+                     JOIN businesses b2 ON b2.id = cl.business_id
+                    WHERE cl.workspace_id = ? AND b2.category IS NOT NULL""",
+                (body.workspace_id,),
+            )}
+
+        result = scoring.compute(dict(b), dict(c) if c else None, icp)
+
+        updated = 0
+        if body.workspace_id:
+            sql = "UPDATE client_leads SET fit = ? WHERE business_id = ? AND workspace_id = ?"
+            args: list[Any] = [result.get("fit_score") or result.get("fit"), business_id,
+                               body.workspace_id]
+            if body.client_business_id:
+                sql += " AND client_business_id = ?"
+                args.append(body.client_business_id)
+            updated = conn.execute(sql, args).rowcount or 0
+            conn.commit()
+        result["assigned_rows_updated"] = updated
+        return result
     finally:
         conn.close()
 
@@ -222,6 +281,29 @@ class ListIn(BaseModel):
     workspace_id: str
     name: str
     business_ids: list[str] = []
+
+
+@router.get("/lists")
+def list_lists(workspace_id: str) -> list[dict]:
+    """Saved static lists, newest first, with their size.
+
+    `Save as list` used to write `lists`/`list_members` and nothing ever read
+    them back, so a saved list disappeared once the toast faded. This is the
+    read half, and `/api/leads?list_id=` is the other half.
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """SELECT l.id, l.name, l.created_at, COUNT(m.business_id) AS members
+                 FROM lists l
+                 LEFT JOIN list_members m ON m.list_id = l.id
+                WHERE l.workspace_id = ?
+                GROUP BY l.id, l.name, l.created_at
+                ORDER BY l.created_at DESC""",
+            (workspace_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 @router.post("/lists")
