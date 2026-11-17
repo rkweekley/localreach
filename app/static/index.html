@@ -75,11 +75,37 @@
   .pill.info{color:#a9cdfb;border-color:#24425f;background:#101d2c}
   .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
   .grid{display:grid;gap:12px}
+  /* The activity row is 1.6fr/1fr on a desktop. Kept as a class, not an inline
+     style, so the phone rule below can actually stack it - an inline
+     grid-template-columns wins over any media query. */
+  .ovrow{grid-template-columns:1.6fr 1fr;margin-top:12px}
   .cards{grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
   .card .k{color:var(--muted);font-size:12px;letter-spacing:.02em}
   .card .v{font-size:26px;font-weight:650;margin-top:6px;letter-spacing:-.5px}
   .card .s{color:var(--muted);font-size:12px;margin-top:2px}
+  /* A stat a marketer cannot click is a number, not a dashboard. Every tile
+     navigates to the rows behind it, so the count is always the start of an
+     action rather than a dead end. */
+  .card[data-go]{cursor:pointer;position:relative;transition:border-color .15s,transform .15s}
+  .card[data-go]:hover,.card[data-go]:focus-visible{border-color:var(--acc);transform:translateY(-1px)}
+  .card[data-go]:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .card[data-go] .k{transition:color .15s}
+  .card[data-go]:hover .k,.card[data-go]:focus-visible .k{color:var(--acc)}
+  .card[data-go] .go{position:absolute;top:11px;right:13px;color:var(--muted);font-size:13px;opacity:0;transition:opacity .15s}
+  .card[data-go]:hover .go,.card[data-go]:focus-visible .go{opacity:.9}
+  .feed{display:grid;gap:0}
+  .feed-i{display:grid;grid-template-columns:78px 1fr auto;gap:10px;align-items:baseline;
+    padding:9px 0;border-bottom:1px solid var(--line);cursor:pointer}
+  .feed-i:last-child{border-bottom:0}
+  .feed-i:hover .feed-t{color:var(--acc)}
+  .feed-i:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .feed-k{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .feed-t{font-size:13px;font-weight:600}
+  .feed-d{color:var(--muted);font-size:12px;margin-top:2px;overflow-wrap:anywhere}
+  .feed-w{color:var(--muted);font-size:11.5px;white-space:nowrap}
+  @keyframes flashpad{0%,100%{box-shadow:0 0 0 0 transparent}30%{box-shadow:0 0 0 3px var(--acc)}}
+  .flash{animation:flashpad 1.2s ease-out;border-radius:var(--radius)}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius)}
   .panel-h{display:flex;align-items:center;justify-content:space-between;gap:10px;
     padding:12px 16px;border-bottom:1px solid var(--line)}
@@ -137,6 +163,16 @@
        its content, so it never scrolls - it just gets clipped by the panel. */
     table{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;white-space:nowrap;max-width:100%}
     .panel,.content{min-width:0}
+    /* At 390px a 1.6fr/1fr split gives the activity panel 208px of a 390px
+       screen and the panel opposite it 130px. Stack them instead. */
+    .ovrow{grid-template-columns:1fr}
+    /* 78px of the feed row went to the kind label and 100px to a timestamp -
+       on a 390px phone that left ~178px for the only part that matters. Put
+       label and time on one line and let the title own the next one. */
+    .feed-i{grid-template-columns:1fr auto;grid-template-areas:"k w" "t t";row-gap:2px}
+    .feed-k{grid-area:k}
+    .feed-w{grid-area:w;font-size:11.5px;text-align:right;align-self:center}
+    .feed-i > div:nth-child(2){grid-area:t}
     .h{flex-wrap:wrap;gap:8px}
     .topbar{padding:10px 12px;flex-wrap:wrap}
   }
@@ -218,6 +254,7 @@ const state = {
   dryRun: true,
   sender: "",
   loading: false,
+  pending: null,   // filter a tile wants applied when its view renders
 };
 
 /* ---------------- transport ---------------- */
@@ -280,10 +317,17 @@ $("#gateForm").addEventListener("submit", async (e) => {
 $("#nav").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-view]");
   if (!b) return;
-  state.view = b.dataset.view;
-  [...$("#nav").children].forEach((x) => x.classList.toggle("on", x === b));
-  render();
+  go(b.dataset.view);
 });
+
+// One way to move between views. Tiles, feed rows and "Open outbox" all route
+// through here so the nav highlight and the pending filter can never disagree.
+function go(view, opts) {
+  state.view = view;
+  state.pending = opts || null;
+  [...$("#nav").children].forEach((x) => x.classList.toggle("on", x.dataset.view === view));
+  render();
+}
 $("#btnRefresh").addEventListener("click", () => boot(true));
 $("#btnLock").addEventListener("click", () => lock(""));
 $("#wsSelect").addEventListener("change", (e) => {
@@ -333,6 +377,9 @@ async function render() {
   const v = $("#view");
   v.innerHTML = '<div class="empty">Loading…</div>';
   try {
+    const known = ["overview", "leads", "research", "sequences", "outbox", "voice"];
+    // A tile must never be able to blank the app: an unknown view falls back.
+    if (!known.includes(state.view)) state.view = "overview";
     if (state.view === "overview") await viewOverview(v);
     else if (state.view === "leads") await viewLeads(v);
     else if (state.view === "research") await viewResearch(v);
@@ -353,20 +400,20 @@ async function viewOverview(v) {
       '<p>Daily cap ' + nfmt(d.workspace.daily_send_cap) + ' · footer address ' + esc(d.workspace.physical_address) + '</p></div>' +
       '<div class="row"><span class="pill ' + (d.dry_run ? "warn" : "ok") + '">' + (d.dry_run ? "dry run" : "live") + '</span></div></div>' +
     '<div class="grid cards">' +
-      card("Leads", nfmt(c.leads), c.clients + (c.clients === 1 ? " client" : " clients")) +
-      card("Contacts", nfmt(c.contacts), nfmt(c.contacts_with_email) + " with an email") +
-      card("Sequences", nfmt(c.sequences), c.sequences_active + " active") +
-      card("Emails sent", nfmt(c.sent), c.replies + (c.replies === 1 ? " reply" : " replies")) +
-      card("Open tasks", nfmt(c.open_tasks), "call / LinkedIn steps due") +
-      card("Suppressed", nfmt(c.suppressions), "never contacted again") +
+      card("Leads", nfmt(c.leads), c.clients + (c.clients === 1 ? " client" : " clients"), "leads", {title: "Open every lead"}) +
+      card("Contacts", nfmt(c.contacts), nfmt(c.contacts_with_email) + " with an email", "leads", {bucket: "sendable", title: "Leads you can actually email"}) +
+      card("Sequences", nfmt(c.sequences), c.sequences_active + " active", "sequences", {title: "Open sequences"}) +
+      card("Emails sent", nfmt(c.sent), c.replies + (c.replies === 1 ? " reply" : " replies"), "outbox", {dir: "outbound", title: "Open the outbox"}) +
+      card("Open tasks", nfmt(c.open_tasks), "call / LinkedIn steps due", "overview", {scroll: "taskList", title: "Jump to the task queue"}) +
+      card("Suppressed", nfmt(c.suppressions), "never contacted again", "suppressions", {title: "See who opted out"}) +
     '</div>' +
-    '<div class="grid" style="grid-template-columns:1.6fr 1fr;margin-top:12px">' +
+    '<div class="grid ovrow">' +
       '<div class="panel"><div class="panel-h"><h3>Recent activity</h3>' +
         '<button class="btn ghost sm" data-go="outbox">Open outbox</button></div>' +
-        (d.recent.length ? '<table><thead><tr><th>To</th><th>Subject</th><th>Status</th><th>When</th></tr></thead><tbody>' +
-          d.recent.map((m) => '<tr><td><div class="strong">' + esc(m.business_name || "—") + '</div><div class="mono muted">' + esc(m.to_email || "") + '</div></td>' +
-            '<td>' + esc(m.subject || "—") + '</td><td>' + statusPill(m.provider_status, m.direction) + '</td><td class="muted">' + dt(m.created_at) + "</td></tr>").join("") +
-          "</tbody></table>" : '<div class="empty">Nothing generated yet. Import leads, build a sequence, then run a tick.</div>') +
+        (d.activity && d.activity.length
+          ? '<div class="panel-b feed">' + d.activity.map(feedRow).join("") + "</div>"
+          : '<div class="empty">Nothing has happened in this workspace yet. ' +
+            'Import a lead, run research, or enroll someone — every one of those lands here.</div>') +
       '</div>' +
       '<div class="panel"><div class="panel-h"><h3>Next steps</h3></div><div class="panel-b" style="display:grid;gap:12px">' +
         stepLine("1", "Import leads", "CSV paste or one at a time", "leads") +
@@ -378,9 +425,68 @@ async function viewOverview(v) {
     '<div class="panel" style="margin-top:12px"><div class="panel-h"><h3>Task queue</h3>' +
       '<span class="muted" style="font-size:12px">steps with a non-email channel</span></div>' +
       '<div id="taskList"><div class="empty">Loading…</div></div></div>';
-  v.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => { state.view = b.dataset.go;
-    [...$("#nav").children].forEach((x) => x.classList.toggle("on", x.dataset.view === state.view)); render(); });
+  // Tiles and feed rows are real controls: the count is the entry point to the
+  // rows behind it. Anything focusable must also work from the keyboard.
+  const fire = (el) => {
+    if (el.dataset.supp || el.dataset.go === "suppressions") return suppressionsModal();
+    const target = el.dataset.scroll ? document.getElementById(el.dataset.scroll) : null;
+    if (target) {
+      target.scrollIntoView({block: "center", behavior: "smooth"});
+      target.classList.add("flash");
+      setTimeout(() => target.classList.remove("flash"), 1200);
+      return;
+    }
+    const opts = {};
+    if (el.dataset.bucket) opts.bucket = el.dataset.bucket;
+    if (el.dataset.dir) opts.dir = el.dataset.dir;
+    if (el.dataset.fkind) opts.kind = el.dataset.fkind;
+    go(el.dataset.go, Object.keys(opts).length ? opts : null);
+  };
+  v.querySelectorAll("[data-go]").forEach((el) => {
+    el.onclick = () => fire(el);
+    el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fire(el); } };
+  });
+  v.querySelectorAll(".feed-i[data-fv]").forEach((el) => {
+    el.onclick = () => {
+      const k = el.dataset.fk, ref = el.dataset.fr;
+      if (ref && (k === "email" || k === "reply")) return messageModal(ref);
+      if (k === "optout") return suppressionsModal();
+      go(el.dataset.fv);
+    };
+    el.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); el.click(); } };
+  });
   await loadTasks(v);
+}
+
+const FEED_KINDS = {
+  email: "Sent", reply: "Reply", research: "Research", lead: "Lead",
+  client: "Client", contact: "Contact", task: "Task", optout: "Opt-out",
+  sequence: "Sequence", enrolled: "Enrolled", list: "List", import: "Import",
+};
+function feedRow(f) {
+  const label = FEED_KINDS[f.kind] || f.kind || "Event";
+  return '<div class="feed-i" role="button" tabindex="0" data-fv="' + esc(f.view || "overview") +
+    '" data-fr="' + esc(f.ref || "") + '" data-fk="' + esc(f.kind || "") + '">' +
+    '<div class="feed-k">' + esc(label) + "</div>" +
+    "<div><div class=\"feed-t\">" + esc(f.title || "—") + "</div>" +
+      (f.detail ? '<div class="feed-d">' + esc(f.detail) + "</div>" : "") + "</div>" +
+    '<div class="feed-w">' + esc(dt(f.at)) + "</div></div>";
+}
+
+async function suppressionsModal() {
+  let d;
+  try { d = await api("/api/suppressions?workspace_id=" + encodeURIComponent(state.ws)); }
+  catch (err) { return toast(err.message, "bad"); }
+  $("#modalCard").innerHTML = '<div class="modal-h"><h3>Suppressed addresses</h3>' +
+      '<button class="x" data-close>&times;</button></div><div class="panel-b">' +
+    ((Array.isArray(d) ? d : (d.results || [])).length
+      ? '<table><thead><tr><th>Address</th><th>Scope</th><th>Reason</th><th>When</th></tr></thead><tbody>' +
+        (Array.isArray(d) ? d : d.results).map((s) => "<tr><td class=\"mono\">" + esc(s.email || s.domain || "—") + "</td>" +
+          "<td>" + esc(s.scope || "workspace") + "</td><td>" + esc(s.reason || "—") + "</td>" +
+          '<td class="muted">' + esc(dt(s.created_at)) + "</td></tr>").join("") + "</tbody></table>"
+      : '<div class="empty">Nobody has opted out of this workspace. The unsubscribe link in every email lands here.</div>') +
+    "</div>";
+  $("#modal").hidden = false;
 }
 
 async function loadTasks(root) {
@@ -410,7 +516,18 @@ async function loadTasks(root) {
     } catch (err) { toast(err.message, "bad"); b.disabled = false; }
   });
 }
-const card = (k, val, sub) => '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' + val + '</div><div class="s">' + esc(sub) + "</div></div>";
+const card = (k, val, sub, view, opts) => {
+  const o = opts || {};
+  const attrs = view
+    ? ' data-go="' + esc(view) + '" role="button" tabindex="0"' +
+      (o.bucket ? ' data-bucket="' + esc(o.bucket) + '"' : "") +
+      (o.dir ? ' data-dir="' + esc(o.dir) + '"' : "") +
+      (o.scroll ? ' data-scroll="' + esc(o.scroll) + '"' : "") +
+      (o.title ? ' title="' + esc(o.title) + '"' : "")
+    : "";
+  return '<div class="card"' + attrs + ">" + (view ? '<span class="go">→</span>' : "") +
+    '<div class="k">' + esc(k) + '</div><div class="v">' + val + '</div><div class="s">' + esc(sub) + "</div></div>";
+};
 const stepLine = (n, t, s, go) => '<div class="row" style="justify-content:flex-start;align-items:flex-start">' +
   '<span class="pill info">' + n + '</span><div><div class="strong">' + esc(t) + '</div><div class="muted" style="font-size:12.5px">' + esc(s) + "</div></div></div>";
 function statusPill(status, direction) {
@@ -462,6 +579,11 @@ async function viewLeads(v) {
   $("#fQ").onkeydown = (e) => { if (e.key === "Enter") loadLeads(); };
   $("#fBucket").onchange = () => loadLeads();
   $("#fList").onchange = () => loadLeads();
+  // A tile can land here with a filter already chosen. Apply it before the first
+  // fetch so the marketer sees the rows the tile counted, not the whole list.
+  const pending = state.pending;
+  state.pending = null;
+  if (pending && pending.bucket && $("#fBucket")) $("#fBucket").value = pending.bucket;
   loadLists();
   $("#leadTable").addEventListener("change", (e) => {
     const cb = e.target.closest("input[data-bid]");
@@ -1526,6 +1648,9 @@ async function viewOutbox(v) {
     '<div class="panel"><div id="obTable"><div class="empty">Loading…</div></div></div>';
   $("#obDir").onchange = loadOutbox;
   $("#obRefresh").onclick = loadOutbox;
+  const pending = state.pending;
+  state.pending = null;
+  if (pending && pending.dir) $("#obDir").value = pending.dir;
   await loadOutbox();
 }
 
@@ -1552,10 +1677,16 @@ async function loadOutbox() {
 async function messageModal(id) {
   try {
     const m = await api("/api/messages/" + encodeURIComponent(id));
+    // A reply has no sender we control and no provider status - showing "To — /
+    // From — / Status —" is noise. For inbound mail, name the business instead.
+    const inbound = m.direction === "inbound";
     openModal(m.subject || "(no subject)",
       '<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">' +
-        info("To", m.to_email || "—") + info("From", m.from_email || "—") +
-        info("Status", m.provider_status || "—") + info("Created", dt(m.created_at)) + "</div>" +
+        (inbound
+          ? info("From", m.business_name || m.from_email || "—") + info("Received", dt(m.received_at || m.created_at)) +
+            info("Intent", m.intent || "—") + info("Thread", m.thread_key || "—")
+          : info("To", m.to_email || "—") + info("From", m.from_email || "—") +
+            info("Status", m.provider_status || "—") + info("Created", dt(m.created_at))) + "</div>" +
       "<pre>" + esc(m.body || "(no body)") + "</pre>",
       '<button class="btn ghost sm" data-close>Close</button>');
   } catch (err) { toast(err.message, "bad"); }
