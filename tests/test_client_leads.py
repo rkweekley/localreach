@@ -45,6 +45,7 @@ def _teardown():
         marks = ",".join("?" * len(ws_ids))
         bmarks = ",".join("?" * len(biz_ids))
         conn.execute(f"DELETE FROM client_leads WHERE workspace_id IN ({marks})", ws_ids)
+        conn.execute(f"DELETE FROM workspace_clients WHERE workspace_id IN ({marks})", ws_ids)
         conn.execute(f"DELETE FROM client_leads WHERE business_id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM client_leads WHERE client_business_id IN ({bmarks})", biz_ids)
         conn.execute(f"DELETE FROM research_leads WHERE workspace_id IN ({marks})", ws_ids)
@@ -375,6 +376,101 @@ def test_status_is_restricted_to_the_known_values(client):
     good = client.patch(f"/api/leads/{lid}", json={"status": "replied"})
     assert good.status_code < 300, good.text
     assert good.json()["status"] == "replied"
+
+
+# --------------------------------------------------------------------------- #
+# a fresh, empty database
+# --------------------------------------------------------------------------- #
+# Clients used to be implied by lead rows, so the first legitimate wipe deleted
+# every client along with the prospects. That made "start fresh" impossible: the
+# clients reappeared as unassigned prospects and outreach had nobody to be signed
+# as. A client is a standing relationship and now has its own table.
+
+def _register(client_obj, ws, name, website):
+    r = client_obj.post("/api/leads/clients", json={
+        "workspace_id": ws, "name": name, "website": website})
+    assert r.status_code < 300, r.text
+    _CLEAN["biz"].add(r.json()["id"])
+    return r.json()
+
+
+def test_client_survives_with_zero_leads(client):
+    conn = connect()
+    try:
+        ws = _workspace(client, slug="client-leads-empty")
+    finally:
+        conn.close()
+
+    made = _register(client, ws, "Ridgeline Excavation LLC", "ridgeline-empty.test")
+
+    body = client.get("/api/leads", params={"workspace_id": ws, "limit": 300}).json()
+    assert [(c["name"], c["leads"]) for c in body["clients"]] == [("Ridgeline Excavation LLC", 0)]
+    assert body["count"] == 0
+    # The client must never come back as a prospect to be assigned to itself.
+    assert made["id"] not in {r.get("business_id") for r in body["items"]}
+    assert made["domain"] == "ridgeline-empty.test"
+
+
+def test_registering_twice_reuses_the_same_company(client):
+    conn = connect()
+    try:
+        ws = _workspace(client, slug="client-leads-twice")
+    finally:
+        conn.close()
+
+    first = _register(client, ws, "Ridgeline Excavation LLC", "ridgeline-twice.test")
+    # Same company, different spelling of the same site - not a second company.
+    second = _register(client, ws, "Ridgeline", "https://www.ridgeline-twice.test/about")
+    assert second["id"] == first["id"]
+
+    body = client.get("/api/leads", params={"workspace_id": ws, "limit": 300}).json()
+    assert len(body["clients"]) == 1
+
+    conn = connect()
+    try:
+        n = conn.execute("SELECT COUNT(*) AS n FROM workspace_clients WHERE workspace_id = ?",
+                         (ws,)).fetchone()["n"]
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_assigning_a_lead_puts_the_client_on_file(client):
+    """Clients created before the registry existed must not stay invisible."""
+    conn = connect()
+    try:
+        ws, cl, p1, _, _ = _setup(conn, client, slug="client-leads-register")
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.post("/api/leads/assign", json={
+        "workspace_id": ws, "business_id": p1, "client_business_id": cl})
+    assert r.status_code < 300, r.text
+
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT source FROM workspace_clients WHERE workspace_id = ? AND business_id = ?",
+            (ws, cl)).fetchone()
+    finally:
+        conn.close()
+    assert row and row["source"] == "manual"
+
+
+def test_client_registration_rejects_nonsense(client):
+    conn = connect()
+    try:
+        ws = _workspace(client, slug="client-leads-bad")
+    finally:
+        conn.close()
+
+    assert client.post("/api/leads/clients", json={
+        "workspace_id": ws, "name": "   ", "website": "example.test"}).status_code == 422
+    assert client.post("/api/leads/clients", json={
+        "workspace_id": ws, "name": "No Site"}).status_code == 422
+    assert client.post("/api/leads/clients", json={
+        "workspace_id": "nope", "name": "Ghost", "website": "ghost.test"}).status_code == 404
 
 
 def test_filters_separate_mailable_leads_from_call_only_ones(client):

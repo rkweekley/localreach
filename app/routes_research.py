@@ -1063,6 +1063,16 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
             )
         elif body.status == "done":
             lead = _upsert_lead(conn, row["workspace_id"], profile)
+            # Researching a site is how a client gets on file: the researched
+            # company IS the client, and the leads are businesses that could buy
+            # from it. Registering it here means a wiped database can be rebuilt
+            # by researching the client's site once.
+            conn.execute(
+                """INSERT OR IGNORE INTO workspace_clients
+                       (id, workspace_id, business_id, status, source, created_at)
+                   VALUES (?,?,?,'active','research',?)""",
+                (new_id(), row["workspace_id"], lead["business_id"], now),
+            )
             summary = _store_research_leads(
                 conn, row["workspace_id"], qid, lead["business_id"], profile,
                 template=body.draft if isinstance(body.draft, dict) else None,

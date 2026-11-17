@@ -476,7 +476,16 @@ function renderLeads() {
   }
 
   const host = $("#leadTable");
-  if (!state.leads.length) { host.innerHTML = '<div class="empty">No leads in this view.</div>'; return; }
+  if (!state.leads.length) {
+    // A wiped database has no leads AND no clients, which would otherwise leave
+    // the operator staring at a dead screen with nothing to click.
+    if ((state.leadClients || []).length) { host.innerHTML = '<div class="empty">No leads in this view.</div>'; return; }
+    host.innerHTML = '<div class="empty">No clients on file yet.<div style="margin-top:9px">' +
+      '<button class="btn sm" id="firstClient">Add your first client</button></div></div>';
+    const fb = $("#firstClient");
+    if (fb) fb.onclick = () => addClientModal(null);
+    return;
+  }
 
   // Grouped by client, because "which of my clients is this lead for" is the
   // question this screen exists to answer. Unassigned sits last and is labelled
@@ -536,7 +545,7 @@ function leadRow(r) {
 function assignModal(businessId) {
   const clients = state.leadClients || [];
   const row = state.leads.find((x) => x.business_id === businessId) || {};
-  if (!clients.length) return toast("No client businesses on file yet", "bad");
+  if (!clients.length) return addClientModal(businessId);
   openModal("Whose lead is " + (row.name || "this prospect") + "?",
     '<p class="muted" style="font-size:12.5px;margin-top:0">Outreach is written and signed as the client you pick here. ' +
     "A prospect can be a lead for more than one client.</p>" +
@@ -551,6 +560,26 @@ function assignModal(businessId) {
         workspace_id: state.ws, business_id: businessId,
         client_business_id: $("#assignClient").value})});
       closeModal(); toast("Assigned", "ok"); await loadLeads();
+    } catch (err) { toast(err.message, "bad"); }
+  };
+}
+
+// Registering a client is a relationship, not research: no leads are created and
+// nothing is sent. Needed because a fresh database has no clients at all, and
+// outreach cannot be written until we know who it is written AS.
+function addClientModal(thenAssignBusinessId) {
+  openModal("Add a client",
+    '<p class="muted" style="font-size:12.5px;margin-top:0">Outreach is written and signed as the client you add here. ' +
+    "Researching their website later fills their lead list.</p>" +
+    '<div class="field"><label>Business name</label><input id="newClientName" placeholder="Ridgeline Excavation LLC"></div>' +
+    '<div class="field"><label>Website</label><input id="newClientSite" placeholder="ridgelineexcavationohio.com"></div>',
+    '<button class="btn ghost sm" data-close>Cancel</button><button class="btn sm" id="doAddClient">Add client</button>');
+  $("#doAddClient").onclick = async () => {
+    try {
+      await api("/api/leads/clients", {method: "POST", body: JSON.stringify({
+        workspace_id: state.ws, name: $("#newClientName").value, website: $("#newClientSite").value})});
+      closeModal(); toast("Client added", "ok"); await loadLeads();
+      if (thenAssignBusinessId) assignModal(thenAssignBusinessId);
     } catch (err) { toast(err.message, "bad"); }
   };
 }

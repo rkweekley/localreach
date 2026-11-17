@@ -64,16 +64,29 @@ SELECT NULL AS id, NULL AS client_business_id, NULL AS client_name, NULL AS clie
   LEFT JOIN contacts ct ON ct.business_id = b.id AND ct.is_primary = 1
  WHERE b.id NOT IN (SELECT business_id FROM client_leads)
    AND b.id NOT IN (SELECT client_business_id FROM client_leads)
+   AND b.id NOT IN (SELECT business_id FROM workspace_clients)
    AND b.id NOT IN (SELECT client_business_id FROM research_leads
                      WHERE client_business_id IS NOT NULL)
 """
 
 
+def _register_client(conn, workspace_id: str, business_id: str, source: str) -> None:
+    """Record a standing client relationship. Idempotent."""
+    conn.execute(
+        """INSERT OR IGNORE INTO workspace_clients
+               (id, workspace_id, business_id, status, source, created_at)
+           VALUES (?,?,?,'active',?,?)""",
+        (new_id(), workspace_id, business_id, source, utcnow()),
+    )
+
+
 def _clients(conn, workspace_id: str) -> list[dict[str, Any]]:
     """Clients the operator can file a lead under, with their live lead counts.
 
-    Source is `client_leads` plus `research_leads`, so a client whose leads were
-    never attributed still appears (with 0) instead of silently vanishing.
+    A client exists because `workspace_clients` says so - not because some lead
+    row happens to point at it. Legacy evidence (`client_leads`,
+    `research_leads`) is unioned in so installs that predate the registry still
+    list their clients, but a client with zero leads now stays listed at 0.
     """
     counts = {r["client_business_id"]: r["n"] for r in conn.execute(
         "SELECT client_business_id, COUNT(*) AS n FROM client_leads WHERE workspace_id = ? GROUP BY 1",
@@ -81,11 +94,13 @@ def _clients(conn, workspace_id: str) -> list[dict[str, Any]]:
     )}
     rows = conn.execute(
         """SELECT b.id, b.name, b.domain FROM businesses b
-            WHERE b.id IN (SELECT client_business_id FROM client_leads WHERE workspace_id = ?)
+            WHERE b.id IN (SELECT business_id FROM workspace_clients
+                            WHERE workspace_id = ? AND status = 'active')
+               OR b.id IN (SELECT client_business_id FROM client_leads WHERE workspace_id = ?)
                OR b.id IN (SELECT client_business_id FROM research_leads
                             WHERE client_business_id IS NOT NULL AND workspace_id = ?)
             ORDER BY b.name""",
-        (workspace_id, workspace_id),
+        (workspace_id, workspace_id, workspace_id),
     )
     return [{"id": r["id"], "name": r["name"], "domain": r["domain"],
              "leads": counts.get(r["id"], 0)} for r in rows]
@@ -135,6 +150,72 @@ def list_leads(
         conn.close()
 
 
+class ClientIn(BaseModel):
+    workspace_id: str
+    business_id: str | None = None
+    name: str | None = None
+    website: str | None = None
+
+
+@router.post("/clients")
+def add_client(body: ClientIn) -> dict:
+    """Register a client so the Leads tab has somewhere to file prospects.
+
+    Takes either an existing `business_id` or a name + website. Registering is a
+    relationship, not research: no leads are created, so this is safe to run on a
+    freshly wiped database. Research on the client's site registers it too.
+    """
+    from .research import ResearchError, normalize_url
+
+    conn = connect()
+    try:
+        if not conn.execute("SELECT 1 FROM workspaces WHERE id = ?", (body.workspace_id,)).fetchone():
+            raise HTTPException(404, "workspace not found")
+
+        if body.business_id:
+            biz = conn.execute(
+                "SELECT id, name, domain FROM businesses WHERE id = ?", (body.business_id,)
+            ).fetchone()
+            if not biz:
+                raise HTTPException(404, "business not found")
+            bid = biz["id"]
+        else:
+            name = (body.name or "").strip()
+            if not name:
+                raise HTTPException(422, "a client needs a name")
+            try:
+                url, domain = normalize_url(body.website or "")
+            except ResearchError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            # 'www.' is a spelling of the same site, not a different company.
+            if domain.startswith("www."):
+                domain = domain[4:]
+            biz = conn.execute(
+                "SELECT id, name, domain FROM businesses WHERE lower(trim(domain)) = ? ORDER BY created_at LIMIT 1",
+                (domain,),
+            ).fetchone()
+            if biz:
+                bid = biz["id"]
+            else:
+                bid = new_id()
+                now = utcnow()
+                conn.execute(
+                    """INSERT INTO businesses (id, name, domain, website, source, created_at, updated_at)
+                       VALUES (?,?,?,?,'manual',?,?)""",
+                    (bid, name, domain, url, now, now),
+                )
+        _register_client(conn, body.workspace_id, bid, "manual")
+        conn.commit()
+        row = conn.execute("SELECT id, name, domain FROM businesses WHERE id = ?", (bid,)).fetchone()
+        leads = conn.execute(
+            "SELECT COUNT(*) AS n FROM client_leads WHERE workspace_id = ? AND client_business_id = ?",
+            (body.workspace_id, bid),
+        ).fetchone()["n"]
+        return {"id": row["id"], "name": row["name"], "domain": row["domain"], "leads": leads}
+    finally:
+        conn.close()
+
+
 class AssignIn(BaseModel):
     workspace_id: str
     business_id: str
@@ -159,6 +240,10 @@ def assign(body: AssignIn) -> dict:
                 raise HTTPException(404, f"{label} not found")
         if not conn.execute("SELECT 1 FROM workspaces WHERE id = ?", (body.workspace_id,)).fetchone():
             raise HTTPException(404, "workspace not found")
+
+        # Filing a lead under a client is also evidence the client exists - keep
+        # the registry honest even for clients added before it existed.
+        _register_client(conn, body.workspace_id, body.client_business_id, "manual")
 
         # If research already produced evidence for this exact pair, keep the link
         # so the UI can show the signal and the first-touch draft behind the lead.

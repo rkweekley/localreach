@@ -312,3 +312,22 @@ CREATE TABLE IF NOT EXISTS client_leads (
 CREATE INDEX IF NOT EXISTS idx_clead_client ON client_leads (client_business_id, status);
 CREATE INDEX IF NOT EXISTS idx_clead_business ON client_leads (business_id);
 CREATE INDEX IF NOT EXISTS idx_clead_ws ON client_leads (workspace_id, created_at);
+
+-- Who our clients ARE, independent of whether they have leads yet.
+--
+-- Clients used to be *implied*: a business counted as a client only because it
+-- appeared as `client_business_id` on some lead row. That made the client list a
+-- side effect of prospect data — wipe the leads and the clients vanish from the
+-- UI, while both client companies reappear in the unassigned bucket looking
+-- exactly like prospects. A client is a standing relationship, so it gets its own
+-- row: registered when research runs against their site, or added by hand.
+CREATE TABLE IF NOT EXISTS workspace_clients (
+  id           TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  business_id  TEXT NOT NULL REFERENCES businesses(id),
+  status       TEXT NOT NULL DEFAULT 'active',   -- active | paused | ended
+  source       TEXT,                             -- research | manual | seed
+  created_at   TEXT NOT NULL,
+  UNIQUE (workspace_id, business_id)
+);
+CREATE INDEX IF NOT EXISTS idx_wclient_ws ON workspace_clients (workspace_id, status);
