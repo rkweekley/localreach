@@ -242,6 +242,9 @@ def test_root_serves_the_dashboard_and_identity_keeps_the_json_card():
     assert r.headers["content-type"].startswith("text/html")
     assert "LocalReach" in r.text
     assert "lr.token" in r.text  # the shell reads the token from localStorage
+    # A deploy must be visible on the next load; without this the browser may reuse
+    # the previous shell and the fix looks like it never shipped.
+    assert "no-store" in r.headers["cache-control"]
 
     ident = client.get("/identity").json()
     assert ident["service"] == "LocalReach"

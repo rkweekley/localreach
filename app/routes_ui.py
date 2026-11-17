@@ -30,8 +30,16 @@ router = APIRouter(prefix="/api", tags=["views"])
 
 @public.get("/", response_class=HTMLResponse)
 def dashboard() -> HTMLResponse:
-    """The operator UI. Read per request so a deploy never serves a stale shell."""
-    return HTMLResponse(_INDEX.read_text(encoding="utf-8"))
+    """The operator UI. Read per request so a deploy never serves a stale shell.
+
+    `no-store` matters as much as the per-request read: without a Cache-Control the
+    browser is free to reuse the previous shell after a deploy, which reads as "the
+    fix did not work" while the server is in fact serving the new code.
+    """
+    return HTMLResponse(
+        _INDEX.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
 
 
 @router.get("/overview")
