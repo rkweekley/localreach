@@ -49,6 +49,16 @@ def overview(workspace_id: str) -> dict:
             raise HTTPException(404, "workspace not found")
 
         biz = conn.execute("SELECT COUNT(*) AS n FROM businesses").fetchone()["n"]
+        # "Leads" must count prospect relationships, never the company registry: a client
+        # is a businesses row too, so counting businesses reported 2 "leads" on an empty
+        # database and made a completed wipe look like it had failed.
+        leads = conn.execute(
+            "SELECT COUNT(*) AS n FROM client_leads WHERE workspace_id = ?", (workspace_id,),
+        ).fetchone()["n"]
+        clients = conn.execute(
+            "SELECT COUNT(*) AS n FROM workspace_clients WHERE workspace_id = ? AND status = 'active'",
+            (workspace_id,),
+        ).fetchone()["n"]
         contacts = conn.execute(
             """SELECT COUNT(*) AS total,
                       COALESCE(SUM(email IS NOT NULL), 0) AS with_email,
@@ -93,6 +103,8 @@ def overview(workspace_id: str) -> dict:
             "sender": settings.mailgun_sender,
             "counts": {
                 "businesses": biz,
+                "leads": leads,
+                "clients": clients,
                 "contacts": contacts["total"],
                 "contacts_with_email": contacts["with_email"],
                 "contacts_verified": contacts["verified"],

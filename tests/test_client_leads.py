@@ -411,6 +411,48 @@ def test_client_survives_with_zero_leads(client):
     assert made["domain"] == "ridgeline-empty.test"
 
 
+def test_dashboard_leads_counts_prospects_not_clients(client):
+    """The Overview tile said "Leads 2" on a database with zero leads.
+
+    `businesses` is the company registry and every client is in it, so counting
+    registry rows makes a completed wipe look like it failed.
+    """
+    conn = connect()
+    try:
+        ws = _workspace(client, slug="client-leads-dash")
+    finally:
+        conn.close()
+
+    _register(client, ws, "Ridgeline Excavation LLC", "ridgeline-dash.test")
+    _register(client, ws, "Cyberal Solutions", "cyberal-dash.test")
+
+    counts = client.get("/api/overview", params={"workspace_id": ws}).json()["counts"]
+    assert counts["leads"] == 0
+    assert counts["clients"] == 2
+    assert counts["businesses"] >= 2
+
+
+def test_dashboard_leads_moves_when_a_prospect_is_filed(client):
+    conn = connect()
+    try:
+        ws = _workspace(client, slug="client-leads-dash2")
+        owner = _biz(conn, "Ridgeline Excavation LLC", domain="ridgeline-dash2.test")
+        conn.execute(
+            "INSERT INTO workspace_clients (id, workspace_id, business_id, status, source, created_at)"
+            " VALUES (?, ?, ?, 'active', 'manual', ?)",
+            (new_id(), ws, owner, utcnow()),
+        )
+        prospect = _biz(conn, "Piedmont Residential", domain="piedmont-dash2.test")
+        _owner(conn, ws, owner, prospect, origin="research")
+        conn.commit()
+    finally:
+        conn.close()
+
+    counts = client.get("/api/overview", params={"workspace_id": ws}).json()["counts"]
+    assert counts["leads"] == 1
+    assert counts["clients"] == 1
+
+
 def test_registering_twice_reuses_the_same_company(client):
     conn = connect()
     try:

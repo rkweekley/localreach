@@ -344,7 +344,7 @@ async function viewOverview(v) {
       '<p>Daily cap ' + nfmt(d.workspace.daily_send_cap) + ' · footer address ' + esc(d.workspace.physical_address) + '</p></div>' +
       '<div class="row"><span class="pill ' + (d.dry_run ? "warn" : "ok") + '">' + (d.dry_run ? "dry run" : "live") + '</span></div></div>' +
     '<div class="grid cards">' +
-      card("Leads", nfmt(c.businesses), c.contacts + " contacts · " + c.contacts_verified + " verified") +
+      card("Leads", nfmt(c.leads), c.clients + " clients · " + c.contacts + " contacts") +
       card("Sequences", nfmt(c.sequences), c.sequences_active + " active") +
       card("Messages", nfmt(c.sent), c.replies + " replies") +
       card("Open tasks", nfmt(c.open_tasks), "calls / research queued") +
