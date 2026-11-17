@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -939,6 +941,16 @@ def import_researched(body: ImportIn) -> dict:
 
 _QUEUE_OPEN = ("pending", "claimed")
 
+# A run is a separate process on another machine, so "claimed" is not proof of
+# life. Past this many seconds a claim is treated as abandoned and given back,
+# once: a worker that dies mid-run must not block the domain forever, and a
+# second death means the agent is the problem, not the claim.
+STALE_CLAIM_S = int(os.getenv("RESEARCH_STALE_S", "900"))
+MAX_ATTEMPTS = int(os.getenv("RESEARCH_MAX_ATTEMPTS", "2"))
+# The cron runs every minute. Three missed beats is a dead worker, not jitter.
+WORKER_NAME = "hermes"
+WORKER_ALIVE_S = int(os.getenv("WORKER_ALIVE_S", "180"))
+
 
 class QueueIn(BaseModel):
     workspace_id: str
@@ -958,6 +970,29 @@ class CompleteIn(BaseModel):
     error: str | None = None
 
 
+class ProgressIn(BaseModel):
+    stage: str
+    note: str | None = None
+
+
+class HeartbeatIn(BaseModel):
+    name: str = WORKER_NAME
+    detail: str | None = None
+
+
+def _seconds_since(ts: str | None) -> int | None:
+    """Age of a stored ISO timestamp. Unparseable or missing means unknown."""
+    if not ts:
+        return None
+    try:
+        then = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - then).total_seconds()))
+
+
 def _queue_item(row: Any) -> dict:
     data = dict(row)
     for key in ("profile", "draft"):
@@ -967,7 +1002,143 @@ def _queue_item(row: Any) -> dict:
                 data[key] = json.loads(raw)
             except (json.JSONDecodeError, TypeError):
                 data[key] = None
+    # The UI needs ages, not timestamps: it cannot parse "2026-11-17T19:38:02+00:00"
+    # reliably in every browser, and a clock skew would read as a stall.
+    data["age_seconds"] = _seconds_since(data.get("requested_at"))
+    data["elapsed_seconds"] = _seconds_since(data.get("claimed_at"))
+    data["progress_age_seconds"] = _seconds_since(data.get("progress_at"))
+    data["finished_age_seconds"] = _seconds_since(data.get("finished_at"))
+    # 'queued N ago' must measure the time it has been sitting unclaimed. After a
+    # requeue the row keeps its original requested_at, so counting from there
+    # told the operator it had been waiting for an hour when it was retried a
+    # second ago.
+    data["queued_age_seconds"] = (
+        _seconds_since(data.get("progress_at"))
+        if data.get("status") == "pending" and data.get("progress_at")
+        else data["age_seconds"]
+    )
+    # A claim is not proof of life: the worker refreshes progress_at while it
+    # works, so the last sign of life - not the claim time - decides a stall.
+    last_seen = data.get("progress_at") or data.get("claimed_at")
+    silent_for = _seconds_since(last_seen)
+    data["silent_seconds"] = silent_for
+    data["stalled"] = bool(
+        data.get("status") == "claimed"
+        and (silent_for is None or silent_for > STALE_CLAIM_S)
+    )
+    data["attempts"] = int(data.get("attempts") or 0)
+    data["can_retry"] = data["stalled"] or data.get("status") == "error"
     return data
+
+
+def _reap_stale(conn: Any, workspace_id: str | None = None) -> int:
+    """Return abandoned claims to the queue. Refuses to retry forever."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=STALE_CLAIM_S)).replace(
+        microsecond=0
+    ).isoformat()
+    where = (
+        "status = 'claimed' AND claimed_at IS NOT NULL"
+        " AND COALESCE(progress_at, claimed_at) < ?"
+    )
+    args: list[Any] = [cutoff]
+    if workspace_id:
+        where += " AND workspace_id = ?"
+        args.append(workspace_id)
+    stale = conn.execute(f"SELECT * FROM research_queue WHERE {where}", args).fetchall()
+    for row in stale:
+        if (row["attempts"] or 0) >= MAX_ATTEMPTS:
+            conn.execute(
+                "UPDATE research_queue SET status = 'error', finished_at = ?,"
+                " error = ?, progress_stage = 'error' WHERE id = ?",
+                (
+                    utcnow(),
+                    f"the worker claimed this {STALE_CLAIM_S // 60} minutes ago and never"
+                    " reported back, twice - the agent run is failing, not the queue",
+                    row["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE research_queue SET status = 'pending', claimed_at = NULL,"
+                " progress_stage = 'requeued',"
+                " progress_note = 'previous worker stopped reporting; retrying',"
+                " progress_at = ? WHERE id = ?",
+                (utcnow(), row["id"]),
+            )
+    return len(stale)
+
+
+@router.post("/research/heartbeat")
+def worker_heartbeat(body: HeartbeatIn) -> dict:
+    """Worker side: 'I am alive and this is what I am doing'."""
+    now = utcnow()
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO worker_heartbeat (name, seen_at, detail) VALUES (?,?,?)"
+            " ON CONFLICT(name) DO UPDATE SET seen_at = excluded.seen_at,"
+            " detail = excluded.detail",
+            (body.name or WORKER_NAME, now, body.detail),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "seen_at": now}
+
+
+@router.post("/research/queue/{qid}/progress")
+def queue_progress(qid: str, body: ProgressIn) -> dict:
+    """Worker side: a stage a human can watch, so silence stops meaning 'dead'."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "queue item not found")
+        if row["status"] != "claimed":
+            # Only a claiming worker owns a row. Progress aimed at a pending row
+            # is out of order (a late ticker, a retry that reset the claim) and
+            # would paint an unclaimed domain as 'the agent is reading it'.
+            # Progress after a finish is likewise not an error worth failing a run.
+            return {"ok": True, "ignored": row["status"]}
+        conn.execute(
+            "UPDATE research_queue SET progress_stage = ?, progress_note = ?,"
+            " progress_at = ? WHERE id = ?",
+            (body.stage[:40], (body.note or "")[:300], utcnow(), qid),
+        )
+        conn.commit()
+        fresh = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
+    finally:
+        conn.close()
+    return {"ok": True, "item": _queue_item(fresh)}
+
+
+@router.post("/research/queue/{qid}/requeue")
+def requeue_item(qid: str, force: bool = False) -> dict:
+    """Give a dead or failed run back to the queue.
+
+    A healthy claim is refused: restarting a run the worker is in the middle of
+    would race two agents over one row and duplicate the writes.
+    """
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "queue item not found")
+        item = _queue_item(row)
+        if row["status"] in _QUEUE_OPEN and not item["stalled"] and not force:
+            raise HTTPException(409, "that run is still in progress")
+        conn.execute(
+            "UPDATE research_queue SET status = 'pending', claimed_at = NULL,"
+            " finished_at = NULL, error = NULL, attempts = 0,"
+            " progress_stage = 'requeued',"
+            " progress_note = 'retry requested', progress_at = ? WHERE id = ?",
+            (utcnow(), qid),
+        )
+        conn.commit()
+        fresh = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()
+    finally:
+        conn.close()
+    return {"ok": True, "item": _queue_item(fresh)}
 
 
 @router.post("/research/queue")
@@ -989,9 +1160,31 @@ def enqueue_research(body: QueueIn, request: Request) -> dict:
             (body.workspace_id, domain),
         ).fetchone()
         if open_row:
+            item = _queue_item(open_row)
+            if item["stalled"]:
+                # A dead worker's row must not answer "already queued" forever:
+                # the operator asked again, so take the row back and clear the
+                # attempt count - a human retry earns a full try.
+                conn.execute(
+                    "UPDATE research_queue SET status = 'pending', claimed_at = NULL,"
+                    " attempts = 0, progress_stage = 'queued',"
+                    " progress_note = 'previous worker stopped reporting; re-queued by hand',"
+                    " progress_at = ? WHERE id = ?",
+                    (utcnow(), open_row["id"]),
+                )
+                conn.commit()
+                row = conn.execute(
+                    "SELECT * FROM research_queue WHERE id = ?", (open_row["id"],)
+                ).fetchone()
+                return {
+                    "duplicate": False,
+                    "retried": True,
+                    "item": _queue_item(row),
+                    "note": "The previous attempt died - re-queued for the agent.",
+                }
             return {
                 "duplicate": True,
-                "item": _queue_item(open_row),
+                "item": item,
                 "note": "Already queued - the agent will pick it up.",
             }
         qid = new_id()
@@ -1015,13 +1208,28 @@ def list_queue(workspace_id: str, limit: int = 25) -> dict:
             "SELECT * FROM research_queue WHERE workspace_id = ? ORDER BY requested_at DESC LIMIT ?",
             (workspace_id, max(1, min(limit, 100))),
         ).fetchall()
+        beat = conn.execute(
+            "SELECT * FROM worker_heartbeat WHERE name = ?", (WORKER_NAME,)
+        ).fetchone()
     finally:
         conn.close()
     items = [_queue_item(r) for r in fetched]
+    beat_age = _seconds_since(beat["seen_at"]) if beat else None
     return {
         "items": items,
         "pending": sum(1 for i in items if i["status"] in _QUEUE_OPEN),
         "done": sum(1 for i in items if i["status"] == "done"),
+        "stalled": sum(1 for i in items if i["stalled"]),
+        # A queue with no worker is not a queue. Report it so the page can say
+        # "the cron is down" instead of leaving the operator waiting on nothing.
+        "worker": {
+            "name": WORKER_NAME,
+            "seen_at": beat["seen_at"] if beat else None,
+            "age_seconds": beat_age,
+            "detail": beat["detail"] if beat else None,
+            "alive": beat_age is not None and beat_age <= WORKER_ALIVE_S,
+        },
+        "server_time": utcnow(),
     }
 
 
@@ -1033,6 +1241,10 @@ def claim_queue(body: ClaimIn) -> dict:
     claimed: list[dict] = []
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # A worker that died mid-run must not keep a domain locked. Reap first,
+        # in the same transaction as the claim, so two workers cannot both grab
+        # the reaped row.
+        _reap_stale(conn, body.workspace_id)
         sql = (
             "SELECT * FROM research_queue WHERE status = 'pending'"
             + (" AND workspace_id = ?" if body.workspace_id else "")
@@ -1044,8 +1256,9 @@ def claim_queue(body: ClaimIn) -> dict:
         for row in picks:
             conn.execute(
                 "UPDATE research_queue SET status = 'claimed', claimed_at = ?,"
-                " attempts = attempts + 1 WHERE id = ?",
-                (now, row["id"]),
+                " attempts = attempts + 1, progress_stage = 'claimed',"
+                " progress_note = 'worker picked it up', progress_at = ? WHERE id = ?",
+                (now, now, row["id"]),
             )
             item = _queue_item(row)
             item.update(
@@ -1078,7 +1291,8 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
         if body.status == "done" and not (profile.get("business_name") or profile.get("name")):
             conn.execute(
                 "UPDATE research_queue SET status = 'error',"
-                " error = 'the worker returned no company name', finished_at = ? WHERE id = ?",
+                " error = 'the worker returned no company name', finished_at = ?,"
+                " progress_stage = 'error' WHERE id = ?",
                 (now, qid),
             )
         elif body.status == "done":
@@ -1101,19 +1315,29 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
             profile["leads_list_id"] = summary["list_id"]
             conn.execute(
                 "UPDATE research_queue SET status = 'done', business_id = ?, profile = ?,"
-                " draft = ?, error = NULL, finished_at = ? WHERE id = ?",
+                " draft = ?, error = NULL, finished_at = ?, progress_stage = 'done',"
+                " progress_note = ?, progress_at = ? WHERE id = ?",
                 (
                     lead["business_id"],
                     json.dumps(profile),
                     json.dumps(body.draft) if body.draft else None,
+                    now,
+                    f"found {profile['leads_found']} leads",
                     now,
                     qid,
                 ),
             )
         else:
             conn.execute(
-                "UPDATE research_queue SET status = 'error', error = ?, finished_at = ? WHERE id = ?",
-                ((body.error or "worker reported an error")[:500], now, qid),
+                "UPDATE research_queue SET status = 'error', error = ?, finished_at = ?,"
+                " progress_stage = 'error', progress_note = ?, progress_at = ? WHERE id = ?",
+                (
+                    (body.error or "worker reported an error")[:500],
+                    now,
+                    (body.error or "worker reported an error")[:300],
+                    now,
+                    qid,
+                ),
             )
         conn.commit()
         row = conn.execute("SELECT * FROM research_queue WHERE id = ?", (qid,)).fetchone()

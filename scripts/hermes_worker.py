@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -122,6 +123,48 @@ def call(method: str, path: str, payload: dict | None = None) -> dict:
         raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {body}") from exc
 
 
+class Ticker(threading.Thread):
+    """Repeat a progress post while a long step runs.
+
+    A single agent turn can take minutes and prints nothing until it ends, so
+    the run would otherwise be silent from claim to complete - indistinguishable
+    from a dead worker. The ticker keeps progress_at fresh so the UI can show
+    "still alive, N seconds since last sign of life" instead of nothing.
+    """
+
+    def __init__(self, qid: str, stage: str, note: str, every: int = 20) -> None:
+        super().__init__(daemon=True)
+        self.qid, self.stage, self.note, self.every = qid, stage, note, every
+        self._stop = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop.wait(self.every):
+            progress(self.qid, self.stage, self.note)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+def progress(qid: str, stage: str, note: str | None = None) -> None:
+    """Tell the queue what the worker is doing. Never fatal."""
+    if DRY_RUN or not qid:
+        return
+    try:
+        call("POST", f"/api/research/queue/{qid}/progress", {"stage": stage, "note": note})
+    except Exception as exc:  # noqa: BLE001 - a lost update is not a lost run
+        log(f"progress update failed - {exc}")
+
+
+def heartbeat(detail: str) -> None:
+    """Tell the queue a worker exists at all, so an idle page can say so."""
+    if DRY_RUN:
+        return
+    try:
+        call("POST", "/api/research/heartbeat", {"name": "hermes", "detail": detail[:200]})
+    except Exception as exc:  # noqa: BLE001 - liveness is advisory
+        log(f"heartbeat failed - {exc}")
+
+
 def resolve_workspace() -> str:
     if WORKSPACE:
         return WORKSPACE
@@ -190,19 +233,25 @@ def research_with_agent(domain: str) -> dict:
 def handle_item(item: dict) -> None:
     qid, domain = item["id"], item["domain"]
     log(f"claim {qid} {domain}")
+    progress(qid, "reading", f"the agent is reading {domain}")
+    ticker = Ticker(qid, "reading", f"the agent is reading {domain}")
+    ticker.start()
     try:
         result = research_with_agent(domain)
     except subprocess.TimeoutExpired:
+        ticker.stop()
         if not DRY_RUN:
             call("POST", f"/api/research/queue/{qid}/complete", {"status": "error", "error": f"agent timed out after {TIMEOUT}s"})
         log(f"{domain}: timed out")
         return
     except Exception as exc:  # noqa: BLE001 - reported to the queue, not raised
+        ticker.stop()
         if not DRY_RUN:
             call("POST", f"/api/research/queue/{qid}/complete", {"status": "error", "error": str(exc)})
         log(f"{domain}: failed - {exc}")
         return
-
+    ticker.stop()
+    progress(qid, "saving", "storing the profile, the leads and the draft")
     profile = result.get("profile") or {}
     # The Hermes agent structured this profile with a model, so say so: the
     # UI otherwise labels agent output "page only" and understates the work.
@@ -236,6 +285,9 @@ def main() -> int:
 
     ws = resolve_workspace()
     log(f"worker start url={URL} workspace={ws} batch={BATCH} dry_run={DRY_RUN}")
+    # Announce before the first claim: a page opened while the queue is empty
+    # should still be able to say the worker is alive.
+    heartbeat("idle - looking for queued work")
 
     while True:
         try:
@@ -244,6 +296,7 @@ def main() -> int:
             log(f"claim failed - {exc}")
             if args.once:
                 return 1
+            heartbeat("idle - claim failed, retrying")
             time.sleep(30)
             continue
         items = got.get("claimed") or []
@@ -251,10 +304,13 @@ def main() -> int:
             if args.once:
                 log("queue empty")
                 return 0
+            heartbeat("idle - queue empty")
             time.sleep(20)
             continue
+        heartbeat(f"working on {len(items)} item(s)")
         for item in items:
             handle_item(item)
+            heartbeat("idle - looking for queued work")
         if args.once:
             return 0
 

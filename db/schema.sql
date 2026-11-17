@@ -243,10 +243,25 @@ CREATE TABLE IF NOT EXISTS research_queue (
   requested_by  TEXT,
   requested_at  TEXT NOT NULL,
   claimed_at    TEXT,
-  finished_at   TEXT
+  finished_at   TEXT,
+  -- Progress a human can actually see. A run takes minutes, so silence is
+  -- indistinguishable from a dead worker; the worker posts a stage and touches
+  -- progress_at while it works, and the UI renders both.
+  progress_stage TEXT,
+  progress_note  TEXT,
+  progress_at    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_rq_pending ON research_queue (status, requested_at);
 CREATE INDEX IF NOT EXISTS idx_rq_ws ON research_queue (workspace_id, requested_at);
+
+-- One row per background worker. The UI can then tell "queued and nobody is
+-- coming" apart from "queued and the worker is alive", which is the difference
+-- between waiting and knowing the cron is dead.
+CREATE TABLE IF NOT EXISTS worker_heartbeat (
+  name       TEXT PRIMARY KEY,
+  seen_at    TEXT NOT NULL,
+  detail     TEXT
+);
 
 -- Leads the agent discovered *for* a researched business. The researched domain
 -- is the client (the seller); every row here is a company that buys what the

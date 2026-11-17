@@ -811,6 +811,7 @@ async function viewResearch(v) {
       '</div>' +
       '<p class="muted" style="font-size:12.5px;margin:10px 0 0">One page per request, ten second timeout, no crawling. Private and LAN addresses are refused. Research never sends anything. The agent path queues the domain and picks it up within a minute.</p>' +
     '</div></div>' +
+    '<div id="rsRuns"></div>' +
     '<div id="rsOut"></div>';
 
   $('#rsGo').onclick = () => rsResearch($('#rsUrl').value.trim());
@@ -823,6 +824,9 @@ async function viewResearch(v) {
   if (state.rs) rsRender();
   else $('#rsOut').innerHTML = '<div class="panel"><div class="empty">Enter a domain to see what the business actually does.</div></div>';
   rsStatus();
+  // Re-read the queue on every visit. The run outlives this tab, so the tab
+  // must read the queue back rather than remember what it once started.
+  rsRunsLoad();
 }
 
 async function rsStatus() {
@@ -862,58 +866,144 @@ async function rsResearch(url) {
   else toast(p.used_llm ? 'Read and structured by the model' : 'Read, structured from the page itself', 'ok');
 }
 
+/* --- agent runs ------------------------------------------------------------
+   A run takes minutes and outlives this tab, so nothing about it may live in
+   a click handler's closure: the panel reads the queue back on every visit and
+   reports the worker's own progress notes. */
+let rsTimer = null;
+let rsItems = {};
+
+function rsAge(secs) {
+  if (secs == null) return 'just now';
+  if (secs < 60) return secs + 's';
+  if (secs < 3600) return Math.round(secs / 60) + 'm';
+  if (secs < 86400) return Math.round(secs / 3600) + 'h';
+  return Math.round(secs / 86400) + 'd';
+}
+
 async function rsAgentResearch(url) {
   if (!url) return toast('Paste a domain first', 'bad');
-  const out = $('#rsOut');
-  let item;
   try {
     const d = await api('/api/research/queue', {
       method: 'POST',
       body: JSON.stringify({ workspace_id: state.ws, url: url }),
     });
-    item = d.item;
-    if (d.duplicate) toast('That domain was already queued', '');
+    toast(
+      d.retried ? 'The last run died - re-queued ' + url
+        : d.duplicate ? 'Already queued: ' + url
+        : 'Queued ' + url,
+      d.duplicate && !d.retried ? '' : 'ok');
   } catch (err) {
-    out.innerHTML = '<div class="panel"><div class="empty">' + esc(err.message) + '</div></div>';
     return toast(err.message, 'bad');
   }
-  const started = Date.now();
-  const wait = (row, secs) => {
-    const what = row && row.status === 'claimed' ? 'The agent is reading' : 'Queued for the agent:';
-    out.innerHTML = '<div class="panel"><div class="empty">' + esc(what) + ' ' + esc(url) +
-      ' <span class="muted">(' + secs + 's)</span></div></div>';
-  };
-  wait(item, 0);
-  const tick = async () => {
-    let row = null;
-    try {
-      const list = await api('/api/research/queue?workspace_id=' + encodeURIComponent(state.ws));
-      row = (list.items || []).find((i) => i.id === item.id) || null;
-    } catch (err) { /* transient; keep waiting */ }
-    if (!row) { setTimeout(tick, 4000); return; }
-    const secs = Math.round((Date.now() - started) / 1000);
-    if (row.status === 'pending' || row.status === 'claimed') {
-      wait(row, secs);
-      if (secs > 900) {
-        out.innerHTML = '<div class="panel"><div class="empty">Still queued after ' + secs +
-          's. The worker may not be running - it is <span class="mono">scripts/hermes_worker.py</span>.</div></div>';
-        return;
+  rsRunsLoad();
+}
+
+async function rsRunsLoad() {
+  const host = document.getElementById('rsRuns');
+  if (rsTimer) { clearTimeout(rsTimer); rsTimer = null; }
+  if (!host) return;  // left the view; the run carries on without us
+  let list;
+  try {
+    list = await api('/api/research/queue?workspace_id=' + encodeURIComponent(state.ws));
+  } catch (err) {
+    host.innerHTML = '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
+      '<p class="muted">Could not read the run queue: ' + esc(err.message) + '</p></div></div>';
+    return;
+  }
+  rsRunsRender(list);
+  const open = (list.items || []).filter((i) => i.status === 'pending' || i.status === 'claimed');
+  if (!open.length) return;
+  const w = list.worker || {};
+  // Only a live claim is worth a tight poll; a queue nobody is serving still
+  // gets polled, slowly, in case the cron comes back.
+  const fast = open.some((i) => i.status === 'claimed' && !i.stalled) || (w.alive && open.length);
+  rsTimer = setTimeout(rsRunsLoad, fast ? 5000 : 20000);
+}
+
+function rsRunsRender(list) {
+  const host = document.getElementById('rsRuns');
+  if (!host) return;
+  const items = (list.items || []).slice(0, 8);
+  rsItems = {};
+  items.forEach((i) => { rsItems[i.id] = i; });
+  const w = list.worker || {};
+  const pill = (txt, kind) => '<span class="pill ' + kind + '">' + esc(txt) + '</span>';
+  const workerPill = w.alive
+    ? '<span class="pill ok"><span class="dot"></span>worker alive · last check-in ' + rsAge(w.age_seconds) + ' ago</span>'
+    : w.seen_at
+      ? '<span class="pill bad">worker silent ' + rsAge(w.age_seconds) + ' - the cron is not running</span>'
+      : '<span class="pill warn">worker has never checked in</span>';
+
+  if (!items.length) {
+    host.innerHTML = '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
+      '<div class="row">' + workerPill + '</div>' +
+      '<p class="muted" style="font-size:12.5px;margin:8px 0 0">No agent runs yet. Queue a domain and this panel keeps reporting after you leave the page.</p>' +
+      '</div></div>';
+    return;
+  }
+
+  const rows = items.map((it) => {
+    let state, detail, act = '';
+    if (it.status === 'pending') {
+      const re = it.progress_stage === 'requeued';
+      state = pill((re ? 're-queued ' : 'queued ') + rsAge(it.queued_age_seconds != null ? it.queued_age_seconds : it.age_seconds), 'info');
+      detail = re ? 'Handed back to the agent after a retry.' : 'Waiting for the worker to collect it.';
+    } else if (it.status === 'claimed' && it.stalled) {
+      state = '<span class="pill bad"><span class="dot"></span>no word for ' + rsAge(it.silent_seconds) + '</span>';
+      detail = 'The worker stopped reporting mid-run (attempt ' + nfmt(it.attempts) + ').';
+      act = '<button class="btn ghost sm" data-rs-retry="' + esc(it.id) + '">Retry</button>';
+    } else if (it.status === 'claimed') {
+      state = '<span class="pill ok"><span class="dot"></span>' + esc(it.progress_stage || 'working') +
+        ' - ' + rsAge(it.progress_age_seconds) + ' ago</span>';
+      detail = esc(it.progress_note || 'The agent is working.');
+    } else if (it.status === 'done') {
+      const leads = it.profile && it.profile.leads_found != null ? nfmt(it.profile.leads_found) + ' leads' : '';
+      state = pill('done', 'ok');
+      detail = (leads ? leads : 'no leads') +
+        (it.finished_age_seconds != null ? ' · finished ' + rsAge(it.finished_age_seconds) + ' ago' : '');
+      act = '<button class="btn ghost sm" data-rs-view="' + esc(it.id) + '">View</button>';
+    } else {
+      state = pill('failed', 'bad');
+      detail = esc(it.error || 'unknown error');
+      act = '<button class="btn ghost sm" data-rs-retry="' + esc(it.id) + '">Retry</button>';
+    }
+    return '<div class="row" style="align-items:flex-start;gap:10px;padding:8px 0;border-top:1px solid var(--line)">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div class="row" style="gap:8px"><span class="mono">' + esc(it.domain) + '</span>' + state + '</div>' +
+        '<div class="muted" style="font-size:12.5px;margin-top:3px">' + detail + '</div>' +
+      '</div>' + act + '</div>';
+  }).join('');
+
+  host.innerHTML = '<div class="panel" style="margin-bottom:12px"><div class="panel-b">' +
+    '<div class="row" style="margin-bottom:4px"><strong>Agent runs</strong><div class="spacer"></div>' + workerPill + '</div>' +
+    rows + '</div></div>';
+
+  host.querySelectorAll('[data-rs-view]').forEach((b) => {
+    b.onclick = () => rsShowRun(rsItems[b.getAttribute('data-rs-view')]);
+  });
+  host.querySelectorAll('[data-rs-retry]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await api('/api/research/queue/' + encodeURIComponent(b.getAttribute('data-rs-retry')) + '/requeue', { method: 'POST' });
+        toast('Re-queued', 'ok');
+      } catch (err) {
+        toast(err.message, 'bad');
       }
-      setTimeout(tick, 3000);
-      return;
-    }
-    if (row.status === 'error') {
-      out.innerHTML = '<div class="panel"><div class="empty">The agent could not finish: ' +
-        esc(row.error || 'unknown error') + '</div></div>';
-      return toast('Agent failed: ' + (row.error || 'unknown'), 'bad');
-    }
-    const p = row.profile || {};
-    state.rs = { url: p.url || row.url || url, profile: p, brief: '', businessId: row.business_id || null, leads: null, filters: null };
-    rsRender();
-    toast('The agent researched it' + (row.draft ? ' and wrote their first touch' : ''), 'ok');
-    if (row.draft) rsShowAgentDraft(row.draft, p);
-  };
-  tick();
+      rsRunsLoad();
+    };
+  });
+}
+
+function rsShowRun(it) {
+  if (!it) return;
+  const p = it.profile || {};
+  if (!p.business_name) return toast('That run finished without a profile', 'bad');
+  state.rs = { url: p.url || it.url || it.domain, profile: p, brief: '', businessId: it.business_id || null, leads: null, filters: null };
+  rsRender();
+  toast('Loaded ' + (p.business_name || it.domain), 'ok');
+  if (it.draft) rsShowAgentDraft(it.draft, p);
 }
 
 function rsShowAgentDraft(draft, profile) {

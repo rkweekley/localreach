@@ -99,6 +99,12 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # domain is verified in Mailgun; until then the workspace's verified
     # sender carries the mail with the client's name on it.
     ("sequences", "from_email", "TEXT"),
+    # Visible progress on a queued research run. A run takes minutes and the
+    # worker is a separate process, so without these three columns the UI can
+    # only say "waiting" - which is exactly what a dead worker looks like.
+    ("research_queue", "progress_stage", "TEXT"),
+    ("research_queue", "progress_note", "TEXT"),
+    ("research_queue", "progress_at", "TEXT"),
 ]
 
 
