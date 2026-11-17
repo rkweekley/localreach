@@ -10,6 +10,13 @@
 
 > "do some research and plan out what it would take to make this a full on marketing app, with the ability to use OSINT to find lead data"
 
+...followed by two corrections on review:
+
+> "i want it to be based on what ever the business that is being researched is, look up their geography"
+> "3. use common osint techneques to find emails"
+
+So: geography is **derived from the researched business** (§ 4.3), and email discovery uses **standard OSINT technique** rather than published-addresses-only (§ 4.4) — with the statutory limits in § 3.4 as hard edges, not suggestions.
+
 Two separate asks, and they get conflated constantly by vendors:
 
 1. **Top-of-funnel discovery** — find businesses that might buy the client's service, without the user typing a domain first. Today LocalReach cannot do this. You must already know a domain.
@@ -120,6 +127,33 @@ This is where a lead list becomes a *reason to call*:
 | **Email pattern** | `first.last@` style inferred from colleagues at the same domain | Inference, **never** presented as found |
 
 Hard rule carried forward from the existing build: **a contact address is either printed on the prospect's own site or explicitly marked `inferred`, and inferred addresses are never sendable until verification passes.**
+
+### 3.4 Two statutory landmines in email discovery
+
+These are not vendor policy — they are federal law, and both are the *default* behaviour of every naive email-finder build.
+
+**15 U.S.C. § 7704(b)(1)(A)(i) — harvesting.** It is an aggravated violation to originate a message when the address was "obtained using an automated means from an Internet website or proprietary online service operated by another person, and such website or online service included, at the time the address was obtained, a notice stating that the operator ... will not give, sell, or otherwise transfer addresses maintained by such website or online service to any other party for the purposes of initiating ... electronic mail messages."
+
+Consequence: **automated collection of addresses from third-party sites that post an anti-harvesting notice is off limits.** Directory and portal sites are exactly where such notices live (BBB, chamber listings, lead-gen portals, SaaS directories). We therefore never scrape addresses from a third-party site. First-party sites — the prospect's own domain — are crawled only for addresses the business itself publishes, and we honour `robots.txt`. If a crawled site declares a no-transfer policy, we record `harvest_notice=1` and drop the address rather than argue about it.
+
+**15 U.S.C. § 7704(b)(1)(A)(ii) — dictionary attacks.** Likewise aggravated: addresses "obtained using an automated means that generates possible electronic mail addresses by combining names, letters, or numbers into numerous permutations."
+
+Consequence: **no brute-force `first.last` sweeps.** Generating 40 permutations per person and probing SMTP is precisely the prohibited pattern, and it also gets the domain blocklisted. What we do instead is narrower and defensible: **derive a pattern from an already-confirmed address at that domain, apply it to one named individual whose name we observed on that domain's own site, label the result `inferred`, and verify it before it is ever sendable.** One evidenced candidate per person, never a sweep.
+
+Both provisions are tethered to a message that violates § 7704(a), so a compliant message is the primary defence — but we are not going to build a product that depends on that reading.
+
+**Third-party API terms, checked not assumed:**
+
+| Provider | What its terms say | Effect on us |
+|---|---|---|
+| **Brave Search API** | §Restrictions (i): "store, cache, or create a database of Search Results, in whole or in part, other than transient storage required for operation" | **Cannot** be used to mine or retain prospect data. Usable, if ever, only as a live single lookup whose result is not persisted. |
+| **Bing Search API** | Retired **11 Aug 2025**; replaced by "Grounding with Bing" inside Azure AI | Not an option at all. |
+| **Hunter.io** | Content Policy: sharing or reselling Hunter data requires prior written authorisation; no bulk export of individual-level data for redistribution; records labelled `public` vs `inferred`; SMTP-verified at entry | Usable as **internal** enrichment for our own outreach, **never** white-labelled as our database. Their public/inferred labelling is the same discipline §3.4 imposes on us. |
+| **Common Crawl** | 501(c)(3), free copy of the web for research and analysis | Lawful bulk source for **finding** contact pages; we still only keep addresses published by the business itself. |
+| **Wayback Machine CDX** | Public archive | Excellent for addresses published then removed. Same rule: first-party only. |
+
+That is the whole OSINT budget: no SERP vendor, no scraped social graph, no purchased data.
+
 
 ---
 
@@ -242,6 +276,60 @@ CREATE TABLE IF NOT EXISTS enrichment_jobs (
   claimed_at      TEXT,
   finished_at     TEXT
 );
+
+-- Geography is DERIVED from the researched business, never typed in by hand.
+CREATE TABLE IF NOT EXISTS client_geo (
+  id              TEXT PRIMARY KEY,
+  workspace_id    TEXT NOT NULL REFERENCES workspaces(id),
+  business_id     TEXT NOT NULL REFERENCES businesses(id),
+  label           TEXT,                   -- "Marietta shop", "Parkersburg branch"
+  lat REAL, lon REAL,
+  city TEXT, state TEXT, postal TEXT, county TEXT,
+  radius_km       REAL NOT NULL DEFAULT 40,
+  use_county      INTEGER NOT NULL DEFAULT 0,
+  derived_from    TEXT NOT NULL,          -- overture_match | site_address | public_record | manual
+  evidence        TEXT,                   -- the URL / place id / filing that produced it
+  confidence      REAL,
+  created_at      TEXT NOT NULL,
+  UNIQUE (workspace_id, business_id, label)
+);
+CREATE INDEX IF NOT EXISTS idx_client_geo ON client_geo(workspace_id, business_id);
+
+-- One row per address we ever considered, with the method that produced it.
+-- `contacts.email_source` stays as the coarse label; this is the audit trail.
+CREATE TABLE IF NOT EXISTS contact_sources (
+  id              TEXT PRIMARY KEY,
+  contact_id      TEXT REFERENCES contacts(id),
+  business_id     TEXT NOT NULL REFERENCES businesses(id),
+  email           TEXT NOT NULL,
+  method          TEXT NOT NULL,          -- site_crawl | wayback | commoncrawl | rdap |
+                                          -- security_txt | ct_subdomain | public_record |
+                                          -- pattern_inferred | manual
+  source_url      TEXT,                   -- the page the address was printed on
+  observed_at     TEXT,
+  is_inferred     INTEGER NOT NULL DEFAULT 0,
+  harvest_notice  INTEGER NOT NULL DEFAULT 0,  -- site declared a no-transfer policy; unusable
+  robots_allowed  INTEGER,
+  confidence      REAL,                   -- 0..1 heuristic, not a verification verdict
+  verification    TEXT,                   -- none | dns | smtp_ok | smtp_catchall | smtp_bad | paid
+  verified_at     TEXT,
+  rejected_reason TEXT,
+  created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_contact_sources_email ON contact_sources(email);
+
+-- Learned per-domain conventions, derived from confirmed addresses only.
+CREATE TABLE IF NOT EXISTS email_patterns (
+  id              TEXT PRIMARY KEY,
+  domain          TEXT NOT NULL,
+  pattern         TEXT NOT NULL,          -- {first}.{last} | {f}{last} | {first} | ...
+  evidence_count  INTEGER NOT NULL DEFAULT 0,
+  sample_email    TEXT,
+  catch_all       INTEGER,
+  mx_host         TEXT,
+  last_seen       TEXT NOT NULL,
+  UNIQUE (domain, pattern)
+);
 ```
 
 Marketing surface:
@@ -319,6 +407,8 @@ CREATE TABLE IF NOT EXISTS activities (
 | `app/places.py` | Upsert, `name_norm`, geo search (bbox prefilter + haversine), release diffing |
 | `app/taxonomy.py` | Overture category → our service taxonomy → client offer match |
 | `app/discover.py` | **extend, don't replace** — `search_area()`, `enrich()`, `resolve_to_business()` |
+| `app/geo.py` | **new** — `resolve_client_geo(business_id)` → `client_geo` rows; radius by category; optional county polygons from Overture `divisions` |
+| `app/emailfind.py` | **new** — the OSINT ladder (below): `find_addresses(business_id)` → `contact_sources` rows, each with method + evidence |
 | `app/deliverability.py` | domain auth checks, warmup ladder, cap enforcement, bounce/complaint circuit breaker |
 | `app/routes_discovery.py` | `POST /api/discovery/runs`, `GET /api/discovery/runs/{id}`, `POST /api/discovery/candidates/{...}/queue` |
 | `app/routes_inbound.py` | public `GET /p/{slug}`, `POST /api/inbound/{slug}` (no auth, rate-limited, honeypot) |
@@ -327,18 +417,61 @@ CREATE TABLE IF NOT EXISTS activities (
 
 ### 4.3 Discovery flow, concretely
 
-1. Operator picks a client (e.g. Cyberal), a geography (Marietta + 40 km), and a category set (contractors, dental, law, clinics — whatever the client's offer fixes).
-2. `discovery_runs` row is created with `requested_by`; a worker claims it (`queued → running`), same claim pattern as `research_queue`.
-3. Candidate query: places in bbox, `is_closed = 0`, `confidence >= X`, category in set, **not already a `businesses` row**, **not the client**, **not a client's competitor trade** (the direction guard from `cde7d28`).
-4. Candidate filters that produce the money list:
+The operator picks **a client and a category set. Nothing else.** Geography is a property of the business under research, so it is resolved from evidence:
+
+1. **Resolve the client's geography** (`app/geo.py`), in this order, stopping at the first hit:
+   - **Overture match on domain** — query `places` where `websites` contains the client's registrable host. Overture carries `websites`, so a domain match gives lat/lon, city, county and the POI's own category in one step. This is the primary path and it is free.
+   - **Site address** — crawl the homepage/contact page for a `schema.org` `PostalAddress` or a footer address; geocode it against the nearest Overture place in the same postal code (no external geocoder, no Google).
+   - **Public record** — Ohio SOS / county filing address.
+   - **Manual pin** — UI fallback, recorded as `derived_from='manual'` with the operator as evidence.
+   Every result lands in `client_geo` with `derived_from`, `evidence` and `confidence`, so "why is this searching Cleveland" is always answerable.
+2. **Derive the search area.** Radius defaults by the client's own category, not a global constant — a home-services contractor serves a county; a dentist serves a town:
+
+   | Client category | Default radius | Why |
+   |---|---|---|
+   | Contractors, excavating, roofing, HVAC | 40 km | service-area business, drives to the job |
+   | IT/MSP, marketing, bookkeeping | 60 km | remote-capable, metro-wide |
+   | Dental, medical, chiropractic | 10 km | travel tolerance is low |
+   | Legal, accounting | 25 km | county seat gravity |
+   | Retail, restaurant, salon | 8 km | walk/drive-by |
+
+   `use_county=1` swaps the radius for the county polygon from Overture's `divisions` theme, which matters in rural SE Ohio where a 40 km circle spills into three states but the customer base is one county.
+3. **Build the category set from the client's offer**, via `app/taxonomy.py` — Overture category → our taxonomy → "who buys this". A web/IT seller targets businesses whose site is weak *or absent*, across every local trade; a roofer targets property managers. This mapping is data, not code, so it can be edited without a deploy.
+4. `discovery_runs` row is created carrying the resolved `client_geo.id`, the bbox and the category set; a worker claims it (`queued → running`), same claim pattern as `research_queue`.
+5. Candidate query: places inside the area, `is_closed = 0`, `confidence >= X`, category in set, **not already a `businesses` row**, **not the client**, **not a client's competitor trade** (the direction guard from `cde7d28`).
+6. Candidate filters that produce the money list:
    - `websites` empty → "no website" (the strongest signal for a web/IT seller)
    - website present → enqueue `site_crawl` + `audit`, then rank by `audit_site()` defect weight
-   - no published email → mark as phone task, not email task (existing `tasks` behaviour)
-5. Accepted candidates become `businesses` rows via `place_links` (match on domain, then `name_norm` + postal, then phone). Never create a duplicate business when a domain already exists.
-6. `scores` are computed with the existing three-part model; `reach_score` now uses real verification.
-7. Operator sees a review screen with reason + evidence per row, selects, and `POST /api/leads/queue` puts them into `client_leads` with `origin='discovery'`.
+   - no published email → mark as phone task, not email task (existing `tasks` behaviour), **unless** the ladder below finds a verified address
+7. Accepted candidates become `businesses` rows via `place_links` (match on domain, then `name_norm` + postal, then phone). Never create a duplicate business when a domain already exists.
+8. `scores` are computed with the existing three-part model; `reach_score` now uses real verification.
+9. Operator sees a review screen with reason + evidence per row, selects, and `POST /api/leads/queue` puts them into `client_leads` with `origin='discovery'`.
 
 Every step is idempotent per `(run_id, place_id)`.
+
+### 4.4 The email-discovery ladder (`app/emailfind.py`)
+
+Run cheapest and most lawful first; stop as soon as one address verifies for the person who matters. Every attempt writes a `contact_sources` row **even when it fails**, so the UI can show "we looked here and found nothing" instead of implying nobody tried.
+
+| # | Method | What it does | Confidence | Notes |
+|---|---|---|---|---|
+| 1 | `site_crawl` | Fetch homepage, `/contact`, `/about`, `/team`, `/staff`, sitemap; extract `mailto:`, `schema.org` `email`, and regex over visible text; honour `robots.txt` | 0.95 | The address the business chose to publish |
+| 2 | `security_txt` | `/.well-known/security.txt` per RFC 9116 — often names a real human | 0.8 | One request, frequently overlooked |
+| 3 | `wayback` | Wayback CDX for the same paths; recovers addresses since removed | 0.7 | Public archive; first-party pages only |
+| 4 | `commoncrawl` | CDX/WARC lookup for the domain's contact pages at scale, without touching the origin | 0.7 | Free, lawful bulk index |
+| 5 | `rdap` | Registrant/tech email from RDAP (WHOIS successor) | 0.6 | Often redacted post-GDPR; when present it is authoritative |
+| 6 | `ct_subdomain` | `crt.sh` → subdomains (`mail.`, `portal.`, `intranet.`) → crawl those for contact blocks | 0.5 | Surfaces staff directories the main site hides |
+| 7 | `public_record` | Ohio SOS filings, licensing boards, county permits, public bid portals | 0.8 | Frequently contains the owner's real name — which feeds step 8 |
+| 8 | `pattern_inferred` | **Only** with (a) a confirmed address at the domain establishing a pattern in `email_patterns`, and (b) a named person observed on that domain's own site. Generates **one** candidate | 0.4 → upgraded by verification | Never a sweep; see § 3.4 |
+
+Then verification gates, using the existing `app/verify.py` primitives:
+
+- DNS MX/A pre-filter (already implemented).
+- **SMTP RCPT** — one connection, one recipient, polite HELO, per-domain daily ceiling, immediate backoff on greylisting. Verdicts: `smtp_ok`, `smtp_bad`, `smtp_catchall`.
+- **Catch-all domains**: SMTP cannot confirm an individual. Mark `smtp_catchall`, keep the address out of the sendable set, and route that person to a phone/call task — which is exactly what `tasks` already supports.
+- Optional paid verifier for catch-all resolution, internal use only per § 3.4.
+
+`contacts.email_status` already accepts `verified | risky | invalid | unverified | guessed`, and `SENDABLE = {"verified"}`. **`guessed` maps to `pattern_inferred` and never becomes sendable without a verification verdict.** The ladder changes what fills that column, not what may be sent to.
 
 ---
 
@@ -369,19 +502,22 @@ Each phase ships independently and leaves the app working. Estimates assume focu
 - Test: `test_places.py` asserts licence fields are non-null and that OSM rows carry a `partition='osm'` marker.
 - **Done when:** schema migrates on the live DB without touching existing rows, and 146+ tests still pass.
 
-### Phase 1 — Discovery base layer (3–4 days)
+### Phase 1 — Discovery base layer and derived geography (4–5 days)
 - `app/sources/overture.py` with a pinned release constant; CLI flag `python -m app.sources.overture --bbox ... --release ...`.
 - Ingest `ohio_valley_places.parquet` → `places` (expect order 10^5 rows for that bbox; measure, don't assume).
 - `app/places.py` geo search: bbox prefilter on `(lat, lon)` then haversine, `name_norm` dedupe.
+- **`app/geo.py`** — `resolve_client_geo()`: Overture domain match → site `PostalAddress` → public record → manual pin; category-derived radius table; `use_county` polygon option. Every row carries `derived_from` + `evidence`.
 - `POST /api/discovery/runs` + status endpoint + review list.
-- **Done when:** a run for "Marietta, OH, 40 km, contractors with no website" returns a non-empty, de-duplicated list, and re-running it returns the identical set (idempotency test).
+- **Done when:** pointing the app at a client domain resolves its own geography without the operator typing a city, a run for "that area + that client's buyer profile" returns a non-empty de-duplicated list, and re-running returns the identical set (idempotency test). Second test: a Columbus client and a Marietta client produce different bboxes from the same code path.
 
-### Phase 2 — Enrichment pipeline (2–3 days)
+### Phase 2 — Enrichment pipeline and the email ladder (3–4 days)
 - `enrichment_jobs` worker alongside the existing sequence worker.
 - Site crawl → `audit_site()` findings → `contacts` with `mailto:` extraction behind the existing `is_placeholder` / `foreign_domain` / `directory_host` guards.
 - Tech detection from headers/HTML; DNS auth via existing `domain_auth()`.
-- Email pattern inference stored as `inferred`, verified before ever being `SENDABLE`.
-- **Done when:** a candidate with a live site yields findings with evidence URLs, and a candidate with no email is never turned into an invented address (explicit test).
+- **`app/emailfind.py`** — the eight-step ladder in § 4.4, each step writing a `contact_sources` row whether it hits or misses: `site_crawl`, `security_txt`, `wayback`, `commoncrawl`, `rdap`, `ct_subdomain`, `public_record`, `pattern_inferred`.
+- SMTP RCPT verification with per-domain ceilings and catch-all detection; `smtp_catchall` routes to a phone task instead of a send.
+- `email_patterns` populated **only** from confirmed addresses; `pattern_inferred` produces exactly one candidate per named person.
+- **Done when:** a candidate with a live site yields findings with evidence URLs; a no-email candidate is never turned into an invented address; and a test asserts `pattern_inferred` rows are created with exactly one candidate per person and are not `SENDABLE` until a verdict lands.
 
 ### Phase 3 — Deliverability infrastructure (3–4 days)
 - `sending_domains` / identities, computed warmup cap, rotation.
@@ -406,7 +542,7 @@ Each phase ships independently and leaves the app working. Estimates assume focu
 - Reply classification (interested / not now / unsubscribe / out of office) → stage transition.
 - **Done when:** variant stats come from `events`, not from a second counter that can drift.
 
-**Total: roughly 17–20 focused days.** Phases 1–3 alone (≈10 days) are the difference between a demo and a product; 4–6 are what make it a *marketing app* rather than a mail-merge.
+**Total: roughly 19–22 focused days.** Phases 1–3 alone (≈11 days) are the difference between a demo and a product; 4–6 are what make it a *marketing app* rather than a mail-merge.
 
 ---
 
@@ -418,6 +554,10 @@ Each phase ships independently and leaves the app working. Estimates assume focu
 | Foursquare OS Places | $0 | Apache-2.0 + NOTICE |
 | OSM | $0 | ODbL; keep partitioned |
 | Ohio public records | $0 | Manual/portal scraping, must respect robots + rate |
+| Common Crawl index | $0 | 501(c)(3); used to *locate* contact pages, not to keep third-party addresses |
+| Wayback CDX | $0 | public archive, first-party pages only |
+| RDAP / `security.txt` / `crt.sh` | $0 | registrant contact, RFC 9116, cert transparency |
+| Gmail/Yahoo bulk-sender compliance | $0 | SPF + DKIM + DMARC + one-click List-Unsubscribe; DNS work only |
 | Mailgun | already paid | existing account |
 | Email verification (optional) | ~$10–50/mo at 10k | **estimate, unverified** |
 | Disk | ~1–3 GB per state subset | parquet source is large; store only the bbox subset |
@@ -434,6 +574,10 @@ Each phase ships independently and leaves the app working. Estimates assume focu
 | Domain burned by volume | **High** | Warmup ladder + breaker + dedicated sending domain, phase 3 before any volume |
 | Ingested POIs are stale (businesses closed) | Medium | Two sources + `is_closed` + release-over-release diff |
 | Discovery returns the client's own competitors | Medium | Reuse the direction guard `cde7d28`; explicit test |
+| Geography resolves wrong (client has no site, or a virtual address) | Medium | `derived_from` + `evidence` on every row; confidence threshold; manual pin always available and visibly labelled |
+| Someone builds the naive email finder — 40 permutations per name, SMTP-probed | **High** — it is § 7704(b)(1)(A)(ii) by definition and it burns the sending domain | `email_patterns` requires ≥1 confirmed address at the domain; `pattern_inferred` emits exactly one candidate per named person; test asserts cardinality |
+| Someone scrapes a directory for addresses that posts a no-transfer notice | **High** — § 7704(b)(1)(A)(i) aggravated violation | Third-party sites are never an address source; `harvest_notice` column records and rejects; crawl allowlist is first-party domains only |
+| A SERP API is wired in to "just find contact pages" | Medium — Brave forbids storing results; Bing is retired | No SERP dependency anywhere in the design; Common Crawl/Wayback cover the need lawfully |
 | Invented contacts creep back in | **High** | `inferred` status is never `SENDABLE`; existing three guards retained; test asserts no address without a source URL |
 | Scope creep into a full CRM/SEO suite | Medium | Phases 4–6 are the boundary; content/SEO/social stay in the existing Cyberal tooling |
 
@@ -441,12 +585,16 @@ Each phase ships independently and leaves the app working. Estimates assume focu
 
 ## 9. Open questions for Ryan
 
-These change the build, so they come before code:
+Settled since the first draft:
+
+- **Geography** — *answered*: derived per researched business (see § 4.3), not a global input.
+- **Email finding** — *answered*: common OSINT techniques, constrained by § 3.4 and gated by verification (see § 4.4).
+
+Still open, and these change the build:
 
 1. **Who is the customer?** Just Cyberal's own outreach, or do you intend to sell LocalReach to other agencies? If the latter, multi-tenant billing and per-tenant sending domains move into Phase 1, and that is +5 days.
-2. **Geography?** Ohio Valley only (one bbox, ~10^5 POIs, simple) or nationwide from day one (~10^7, needs Postgres/PostGIS instead of SQLite)? I recommend Ohio Valley first — you sell to local businesses, and a smaller base keeps dedupe honest.
-3. **Email finding policy?** Published-addresses-only (highest quality, lower volume, zero risk) or pattern-inferred-plus-verified (2–3× the volume, small bounce risk)? I recommend published-only until deliverability is proven, then add inferred behind a flag.
-4. **Do you have dashboard access to Google Cloud DNS for `cyberalsolutions.com`?** SPF currently hard-fails Mailgun, so nothing sends legitimately today. This is the one item blocking real outreach regardless of the rest of the plan.
+2. **Do you have dashboard access to Google Cloud DNS for `cyberalsolutions.com`?** SPF currently hard-fails Mailgun, so nothing sends legitimately today. This is the one item blocking real outreach regardless of the rest of the plan.
+3. **Is a phone number an acceptable fallback when a domain is catch-all?** Right now the design routes catch-all addresses to a call task rather than guessing. If you would rather send to catch-all addresses anyway, that is a deliberate deliverability bet and should be a flag, not a default.
 
 ---
 
