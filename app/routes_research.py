@@ -558,16 +558,36 @@ def add_site_contact(body: ContactIn) -> dict:
 
 @router.get("/research/status")
 def research_status() -> dict:
-    """What the UI shows in the corner: is research/LLM live right now?"""
+    """What the UI shows in the corner: is research/LLM live right now?
+
+    `prospects`/`researched` are counted over real lead relationships. Counting
+    `businesses` made the pill read "0 of 2 researched" on a database whose only two
+    rows were the client companies themselves — research targets are prospects, not
+    registry entries.
+    """
     conn = connect()
     try:
-        total = conn.execute("SELECT COUNT(*) AS n FROM businesses").fetchone()["n"]
-        done = conn.execute(
-            "SELECT COUNT(*) AS n FROM businesses WHERE COALESCE(site_research, '') != ''"
+        prospects = conn.execute(
+            "SELECT COUNT(DISTINCT business_id) AS n FROM client_leads"
         ).fetchone()["n"]
+        done = conn.execute(
+            """SELECT COUNT(DISTINCT b.id) AS n FROM businesses b
+               JOIN client_leads cl ON cl.business_id = b.id
+               WHERE COALESCE(b.site_research, '') != ''"""
+        ).fetchone()["n"]
+        clients = conn.execute(
+            "SELECT COUNT(DISTINCT business_id) AS n FROM workspace_clients WHERE status = 'active'"
+        ).fetchone()["n"]
+        total = conn.execute("SELECT COUNT(*) AS n FROM businesses").fetchone()["n"]
     finally:
         conn.close()
-    return {"llm": ai.llm_health(), "researched": done, "businesses": total}
+    return {
+        "llm": ai.llm_health(),
+        "researched": done,
+        "prospects": prospects,
+        "clients": clients,
+        "businesses": total,  # registry size; not a research target count
+    }
 
 
 SIGNAL_KINDS = {

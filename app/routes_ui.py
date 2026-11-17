@@ -67,11 +67,17 @@ def overview(workspace_id: str) -> dict:
             "SELECT COUNT(*) AS n FROM workspace_clients WHERE workspace_id = ? AND status = 'active'",
             (workspace_id,),
         ).fetchone()["n"]
+        # Contacts belong to leads, so scope them to this workspace's lead set. Counting
+        # every contact row made the tile describe other workspaces' data.
         contacts = conn.execute(
             """SELECT COUNT(*) AS total,
                       COALESCE(SUM(email IS NOT NULL), 0) AS with_email,
                       COALESCE(SUM(email_status = 'verified'), 0) AS verified
-               FROM contacts"""
+               FROM contacts
+               WHERE business_id IN (
+                   SELECT business_id FROM client_leads WHERE workspace_id = ?
+               )""",
+            (workspace_id,),
         ).fetchone()
         seqs = conn.execute(
             """SELECT COUNT(*) AS total, COALESCE(SUM(status = 'active'), 0) AS active

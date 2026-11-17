@@ -233,13 +233,6 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
             conn.commit()
             if not claimed:
                 continue
-            if not schedule.is_open(en["send_window"], settings.send_tz):
-                # Leave next_send_at untouched so it goes out when the window
-                # opens instead of being silently dropped.
-                results.append({"enrollment": en["id"], "status": "outside_send_window",
-                                "window": en["send_window"]})
-                continue
-
             step = conn.execute(
                 """SELECT * FROM sequence_steps WHERE sequence_id = ? AND step_order = ?
                    AND variant_of IS NULL LIMIT 1""",
@@ -248,15 +241,50 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
             if not step:
                 conn.execute("UPDATE enrollments SET status='finished' WHERE id=?", (en["id"],))
                 results.append({"enrollment": en["id"], "status": "finished"})
+                conn.commit()
                 continue
             if step["channel"] != "email":
-                # call/linkedin tasks surface in the task queue; the worker skips them
+                # Non-email steps are worked by a human, so they have to become a task row
+                # or nobody ever sees them: the dashboard's "Open tasks" tile reads this
+                # table, and before this insert nothing in the codebase wrote to it, so the
+                # tile could not leave zero and the task queue was permanently empty.
+                #
+                # This branch sits before the send-window check on purpose. The window
+                # exists so we do not email a stranger at 2am; a call or LinkedIn task is
+                # ours to do and must be created when it falls due, not deferred to 9am.
+                next_at = (datetime.now(timezone.utc) + timedelta(days=step["delay_days"])).isoformat()
+                conn.execute(
+                    """INSERT INTO tasks (id, workspace_id, enrollment_id, business_id, contact_id,
+                                          kind, due_at, notes, status, created_at)
+                       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?
+                       WHERE NOT EXISTS (
+                           SELECT 1 FROM tasks
+                           WHERE enrollment_id = ? AND kind = ? AND status = 'open'
+                       )""",
+                    (new_id(), ws["id"], en["id"], en["business_id"], en["contact_id"],
+                     step["channel"], next_at,
+                     f"{step['channel']} step {step['step_order']} of {en['seq_name']}",
+                     utcnow(), en["id"], step["channel"]),
+                )
                 conn.execute(
                     """UPDATE enrollments SET current_step = current_step + 1, next_send_at = ?,
                        claimed_at = NULL, claimed_by = NULL WHERE id = ?""",
-                    ((datetime.now(timezone.utc) + timedelta(days=step["delay_days"])).isoformat(), en["id"]),
+                    (next_at, en["id"]),
                 )
+                conn.commit()
                 results.append({"enrollment": en["id"], "status": "task_only", "channel": step["channel"]})
+                continue
+            if not schedule.is_open(en["send_window"], settings.send_tz):
+                # Leave next_send_at untouched so it goes out when the window opens
+                # instead of being silently dropped - and drop the claim, or the next
+                # tick inside the 15-minute claim window would skip this row entirely.
+                conn.execute(
+                    "UPDATE enrollments SET claimed_at = NULL, claimed_by = NULL WHERE id = ?",
+                    (en["id"],),
+                )
+                conn.commit()
+                results.append({"enrollment": en["id"], "status": "outside_send_window",
+                                "window": en["send_window"]})
                 continue
 
             contact = conn.execute("SELECT * FROM contacts WHERE id = ?", (en["contact_id"],)).fetchone()
@@ -407,6 +435,49 @@ def tick(workspace_id: str, limit: int = 25) -> dict:
         return {"processed": len(results), "results": results}
     finally:
         conn.close()
+
+
+class TaskPatch(BaseModel):
+    status: str = "done"
+
+
+@router.get("/tasks")
+def list_tasks(workspace_id: str, status: str = "open", limit: int = 200) -> dict:
+    """The task queue: steps with a non-email channel that a human has to work."""
+    conn = connect()
+    try:
+        queue = rows(conn.execute(
+            """SELECT t.*, b.name AS business_name, c.email AS to_email
+               FROM tasks t
+               LEFT JOIN businesses b ON b.id = t.business_id
+               LEFT JOIN contacts c ON c.id = t.contact_id
+               WHERE t.workspace_id = ? AND (? = '' OR t.status = ?)
+               ORDER BY COALESCE(t.due_at, t.created_at) LIMIT ?""",
+            (workspace_id, status, status, limit),
+        ))
+    finally:
+        conn.close()
+    return {"results": queue, "count": len(queue)}
+
+
+@router.patch("/tasks/{task_id}")
+def update_task(task_id: str, body: TaskPatch) -> dict:
+    """Close a task. Without this the queue only ever grows and the tile is noise."""
+    if body.status not in ("open", "done", "skipped"):
+        raise HTTPException(422, "status must be open, done or skipped")
+    conn = connect()
+    try:
+        exists = conn.execute("SELECT id FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not exists:
+            raise HTTPException(404, "task not found")
+        conn.execute(
+            "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+            (body.status, None if body.status == "open" else utcnow(), task_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": task_id, "status": body.status}
 
 
 @router.get("/sequences/{sequence_id}/stats")

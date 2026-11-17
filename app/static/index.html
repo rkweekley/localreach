@@ -344,10 +344,11 @@ async function viewOverview(v) {
       '<p>Daily cap ' + nfmt(d.workspace.daily_send_cap) + ' · footer address ' + esc(d.workspace.physical_address) + '</p></div>' +
       '<div class="row"><span class="pill ' + (d.dry_run ? "warn" : "ok") + '">' + (d.dry_run ? "dry run" : "live") + '</span></div></div>' +
     '<div class="grid cards">' +
-      card("Leads", nfmt(c.leads), c.clients + " clients · " + c.contacts + " contacts") +
+      card("Leads", nfmt(c.leads), c.clients + (c.clients === 1 ? " client" : " clients")) +
+      card("Contacts", nfmt(c.contacts), nfmt(c.contacts_with_email) + " with an email") +
       card("Sequences", nfmt(c.sequences), c.sequences_active + " active") +
-      card("Messages", nfmt(c.sent), c.replies + " replies") +
-      card("Open tasks", nfmt(c.open_tasks), "calls / research queued") +
+      card("Emails sent", nfmt(c.sent), c.replies + (c.replies === 1 ? " reply" : " replies")) +
+      card("Open tasks", nfmt(c.open_tasks), "call / LinkedIn steps due") +
       card("Suppressed", nfmt(c.suppressions), "never contacted again") +
     '</div>' +
     '<div class="grid" style="grid-template-columns:1.6fr 1fr;margin-top:12px">' +
@@ -364,11 +365,41 @@ async function viewOverview(v) {
         stepLine("3", "Build a sequence", "3 steps is the default cadence", "sequences") +
         stepLine("4", "Enroll + tick", "in dry run this writes to outbox only", "sequences") +
       '</div></div>' +
-    '</div>';
+    '</div>' +
+    '<div class="panel" style="margin-top:12px"><div class="panel-h"><h3>Task queue</h3>' +
+      '<span class="muted" style="font-size:12px">steps with a non-email channel</span></div>' +
+      '<div id="taskList"><div class="empty">Loading…</div></div></div>';
   v.querySelectorAll("[data-go]").forEach((b) => b.onclick = () => { state.view = b.dataset.go;
     [...$("#nav").children].forEach((x) => x.classList.toggle("on", x.dataset.view === state.view)); render(); });
-  const ob = v.querySelector('[data-go="outbox"]'); if (ob) ob.onclick = () => { state.view = "outbox";
-    [...$("#nav").children].forEach((x) => x.classList.toggle("on", x.dataset.view === "outbox")); render(); };
+  await loadTasks(v);
+}
+
+async function loadTasks(root) {
+  const host = root.querySelector("#taskList");
+  if (!host) return;
+  let d;
+  try { d = await api("/api/tasks?" + q({workspace_id: state.ws, status: "open"})); }
+  catch (err) { host.innerHTML = '<div class="empty">' + esc(err.message) + "</div>"; return; }
+  if (!d.results.length) {
+    host.innerHTML = '<div class="empty">No open tasks. A step with a call or LinkedIn channel lands here when a sequence reaches it.</div>';
+    return;
+  }
+  host.innerHTML = '<table><thead><tr><th>Business</th><th>Kind</th><th>Due</th><th>Notes</th><th></th></tr></thead><tbody>' +
+    d.results.map((t) => '<tr><td><div class="strong">' + esc(t.business_name || "—") + "</div>" +
+        (t.to_email ? '<div class="mono muted">' + esc(t.to_email) + "</div>" : "") + "</td>" +
+      '<td><span class="pill info">' + esc(t.kind) + "</span></td>" +
+      '<td class="muted">' + dt(t.due_at) + "</td>" +
+      '<td class="muted">' + esc(t.notes || "") + "</td>" +
+      '<td><button class="btn ghost sm" data-task="' + esc(t.id) + '">Mark done</button></td></tr>').join("") +
+    "</tbody></table>";
+  host.querySelectorAll("[data-task]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api("/api/tasks/" + encodeURIComponent(b.dataset.task), { method: "PATCH", body: JSON.stringify({ status: "done" }) });
+      toast("Task done");
+      render();
+    } catch (err) { toast(err.message, "bad"); b.disabled = false; }
+  });
 }
 const card = (k, val, sub) => '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' + val + '</div><div class="s">' + esc(sub) + "</div></div>";
 const stepLine = (n, t, s, go) => '<div class="row" style="justify-content:flex-start;align-items:flex-start">' +
@@ -746,7 +777,9 @@ async function rsStatus() {
       ? '<span class="pill ok"><span class="dot"></span>' + esc(m.model || 'model') + (m.latency_ms != null ? ' ' + m.latency_ms + 'ms' : '') + '</span>'
       : '<span class="pill warn"><span class="dot"></span>' + esc(m.configured ? 'model unreachable' : 'templates only') + '</span>';
     host.innerHTML = model +
-      '<span class="pill info">' + nfmt(s.researched) + ' of ' + nfmt(s.businesses) + ' researched</span>';
+      (s.prospects
+        ? '<span class="pill info">' + nfmt(s.researched) + ' of ' + nfmt(s.prospects) + ' leads researched</span>'
+        : '<span class="pill info">no leads yet · ' + nfmt(s.clients) + (s.clients === 1 ? ' client' : ' clients') + '</span>');
   } catch (err) {
     host.innerHTML = '<span class="pill bad">status unavailable</span>';
   }
