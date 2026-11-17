@@ -17,9 +17,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
+from . import export
 from .db import connect, new_id, utcnow
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
@@ -148,6 +149,47 @@ def list_leads(
         }
     finally:
         conn.close()
+
+
+@router.get("/export.csv")
+def export_csv(workspace_id: str) -> Response:
+    """Every lead with its drafted email, as a CSV built for pasting by hand.
+
+    Declared before the `/{lead_id}` routes so a path segment can never be read
+    as an id. The body column carries the finished email *including* the CAN-SPAM
+    footer and the tracked unsubscribe link, because the mailer is what normally
+    adds those and it is not in the loop when a human copies the text.
+    """
+    conn = connect()
+    try:
+        text = export.leads_csv(conn, workspace_id)
+    except KeyError:
+        raise HTTPException(404, "unknown workspace")
+    finally:
+        conn.close()
+    return Response(
+        content="\ufeff" + text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="localreach-leads.csv"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/{lead_id}/email")
+def lead_email(lead_id: str, workspace_id: str) -> dict:
+    """One lead's email, ready to copy: recipient, subject, body, footer, warnings."""
+    conn = connect()
+    try:
+        item = export.lead_email(conn, workspace_id, lead_id)
+    except KeyError:
+        raise HTTPException(404, "unknown workspace")
+    finally:
+        conn.close()
+    if not item:
+        raise HTTPException(404, "no such lead in this workspace")
+    return item
 
 
 class ClientIn(BaseModel):

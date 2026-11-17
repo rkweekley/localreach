@@ -432,6 +432,7 @@ async function viewLeads(v) {
           '<option value="no_email">No email yet</option>' +
         "</select>" +
         '<button class="btn sm" id="btnSearch">Search</button>' +
+        '<button class="btn ghost sm" id="btnExport" title="Download every lead with its finished email, footer included">Export CSV</button>' +
         '<span class="muted" id="leadCount"></span></div>' +
     "</div></div>" +
     '<div class="panel"><div class="action-bar">' +
@@ -443,6 +444,7 @@ async function viewLeads(v) {
     '</div><div id="leadTable"><div class="empty">Loading leads…</div></div></div>';
 
   $("#btnSearch").onclick = () => loadLeads();
+  $("#btnExport").onclick = exportCsv;
   $("#btnImport").onclick = importModal;
   $("#btnScore").onclick = scoreSelected;
   $("#btnList").onclick = saveList;
@@ -718,6 +720,13 @@ async function leadModal(id) {
       '<div style="margin-bottom:6px"><strong>' + esc(r.first_touch_subject || "(no subject)") + "</strong></div>" +
       '<pre style="white-space:pre-wrap;font-size:12.5px">' + esc(r.first_touch_body || "") + "</pre></div>"
     : '<div style="margin-top:12px" class="muted">No first touch drafted yet for this lead.</div>';
+  // Copy fetches the finished email from the server, not from this row: only the
+  // server knows the client's postal address and can mint the unsubscribe token,
+  // and the mailer is not in the loop to add either one.
+  const canCopy = !!r.id && hasTouch;
+  const copyBtn = canCopy
+    ? '<button class="btn sm" id="lmCopy">Copy email</button>'
+    : '<button class="btn sm" id="lmCopy" disabled title="Needs a client-owned lead with a drafted first touch">Copy email</button>';
   openModal(r.name,
     '<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">' +
       info("Lead for", r.client_name || "Unassigned") +
@@ -733,7 +742,57 @@ async function leadModal(id) {
       esc(r.why_now) + "</div></div>" : "") +
     (r.signal_source ? '<div class="muted" style="font-size:12px;margin-top:6px">Evidence: ' + esc(r.signal_source) + "</div>" : "") +
     touch,
-    '<button class="btn ghost sm" data-close>Close</button>');
+    copyBtn + '<button class="btn ghost sm" data-close>Close</button>');
+  if (canCopy) $("#lmCopy").onclick = (e) => copyLeadEmail(e.currentTarget, r.id);
+}
+
+async function copyLeadEmail(btn, leadId) {
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "Copying…";
+  try {
+    const mail = await api("/api/leads/" + encodeURIComponent(leadId) + "/email?" + q({ workspace_id: state.ws }));
+    if (!mail || !mail.copy_text) throw new Error("Nothing to copy for this lead");
+    await navigator.clipboard.writeText(mail.copy_text);
+    btn.textContent = "Copied";
+    const warn = (mail.warnings || [])[0];
+    if (mail.blocked) toast("Copied — but this lead is suppressed: " + mail.block_reason, "bad");
+    else toast(warn || ("Copied" + (mail.to ? " for " + mail.to : "")), warn ? "warn" : "ok");
+  } catch (err) {
+    btn.textContent = label;
+    // Clipboard needs a secure context; stay honest instead of claiming success.
+    toast(/clipboard|secure|denied/i.test(err.message)
+      ? "Clipboard blocked — use Export CSV and copy from the file"
+      : err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { if (btn.textContent === "Copied") btn.textContent = label; }, 2500);
+  }
+}
+
+async function exportCsv(e) {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/leads/export.csv?" + q({ workspace_id: state.ws }), {
+      headers: { Authorization: "Bearer " + store.token },
+    });
+    if (res.status === 401) { lock("Token rejected — paste a current API token."); throw new Error("unauthorized"); }
+    if (!res.ok) throw new Error("Export failed (" + res.status + ")");
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "localreach-leads.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast("Exported", "ok");
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    btn.disabled = false;
+  }
 }
 const info = (k, v) => '<div class="card" style="padding:10px 12px"><div class="k">' + esc(k) + '</div><div style="margin-top:4px">' + esc(v) + "</div></div>";
 
