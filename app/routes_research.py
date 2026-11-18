@@ -27,7 +27,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from . import ai, audit, discover, research, verify
+from . import ai, audit, discover, leadguard, research, verify
 from .db import connect, new_id, norm_company, rows, utcnow
 from .security import RateLimiter, client_ip
 
@@ -630,6 +630,7 @@ def _store_research_leads(
     client_bid: str | None,
     profile: dict,
     template: dict | None = None,
+    guard=None,
 ) -> dict:
     """Save the companies the agent found *for* the researched business.
 
@@ -637,12 +638,19 @@ def _store_research_leads(
     who buys what the client sells. Leads become real businesses so they can be
     sequenced like any other lead, but no contact is created - the agent is told
     never to invent an address, so a hint stays a hint until a human checks it.
+
+    ``guard`` is ``app.leadguard.check_lead`` in production: it drops a domain
+    that its own site does not confirm as this business, and records why. It is
+    injected rather than imported so the storage tests stay offline; the agent
+    once attached a plausible-looking domain to a lead whose source published
+    none, and that domain belonged to an unrelated site.
     """
     found = [x for x in (profile.get("leads") or []) if isinstance(x, dict)]
     client = None
     if client_bid:
-        client = conn.execute("SELECT name, domain FROM businesses WHERE id = ?", (client_bid,)).fetchone()
+        client = conn.execute("SELECT name, domain, city FROM businesses WHERE id = ?", (client_bid,)).fetchone()
     client_name = (client["name"] if client else "") or "researched business"
+    client_city = (client["city"] if client else "") or ""
 
     lid = None
     if found:
@@ -672,6 +680,26 @@ def _store_research_leads(
         if not str(lead.get("signal_source") or "").strip():
             skipped += 1  # unsourced signals are guesses, and guesses waste sends
             continue
+
+        # A domain the agent inferred from the business name is worse than no
+        # domain: it gets crawled, ranked, and eventually mailed. Prove it or drop
+        # it, and keep the reason on the row so the decision is reviewable.
+        had_domain = bool(domain)
+        evidence_note = ""
+        if domain and guard:
+            verdict = guard({"name": name, "domain": domain,
+                             "signal_source": lead.get("signal_source") or ""},
+                            locality=client_city)
+            domain = verdict.get("domain") or ""
+            evidence_note = str(verdict.get("note") or "")[:400]
+
+        # Independent of the domain: a hint is prose, and an address inside prose
+        # has never been checked against a page. Strip it; the crawler is the only
+        # thing allowed to hand us an address.
+        hint_text, dropped = leadguard.sanitize_hint(str(lead.get("contact_hint") or ""))
+        if dropped:
+            extra = f"{len(dropped)} address(es) removed from hint"
+            evidence_note = f"{evidence_note}; {extra}".strip("; ")
 
         kind = str(lead.get("signal_kind") or "other").strip().lower()
         if kind not in SIGNAL_KINDS:
@@ -746,34 +774,45 @@ def _store_research_leads(
             body = str(template.get("body") or "").strip()[:4000]
 
         payload = (
-            name, domain, str(lead.get("why_now") or "")[:600],
+            name, str(lead.get("why_now") or "")[:600],
             kind, str(lead.get("signal_detail") or "")[:1200],
             str(lead.get("signal_source") or "")[:500],
-            str(lead.get("contact_hint") or "")[:300], fit, bid,
+            hint_text[:300], evidence_note, fit, bid,
             subject or None, body or None,
         )
+        cleared = 1 if (had_domain and not domain) else 0
         if existing:
             lead_id = existing["id"]
             conn.execute(
                 """UPDATE research_leads
-                      SET name = ?, domain = COALESCE(NULLIF(?, ''), domain), why_now = ?,
-                          signal_kind = ?, signal_detail = ?,
-                          signal_source = ?, contact_hint = ?, fit = ?, business_id = COALESCE(?, business_id),
+                      SET name = ?,
+                          domain = CASE WHEN ? = 1 THEN NULL
+                                        ELSE COALESCE(NULLIF(?, ''), domain) END,
+                          why_now = ?, signal_kind = ?, signal_detail = ?,
+                          signal_source = ?, contact_hint = ?,
+                          evidence_note = COALESCE(NULLIF(?, ''), evidence_note),
+                          fit = ?, business_id = COALESCE(?, business_id),
                           email_subject = COALESCE(?, email_subject),
                           email_body = COALESCE(?, email_body)
                     WHERE id = ?""",
-                payload + (lead_id,),
+                (payload[0], cleared, domain) + payload[1:] + (lead_id,),
             )
             updated += 1
         else:
             lead_id = new_id()
             conn.execute(
                 """INSERT INTO research_leads (name, domain, why_now, signal_kind, signal_detail,
-                                               signal_source, contact_hint, fit, business_id,
+                                               signal_source, contact_hint, evidence_note,
+                                               fit, business_id,
                                                email_subject, email_body,
                                                id, queue_id, workspace_id, client_business_id, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                payload + (lead_id, queue_id, workspace_id, client_bid, utcnow()),
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (name, domain or None, str(lead.get("why_now") or "")[:600],
+                 kind, str(lead.get("signal_detail") or "")[:1200],
+                 str(lead.get("signal_source") or "")[:500],
+                 hint_text[:300], evidence_note or None, fit, bid,
+                 subject or None, body or None,
+                 lead_id, queue_id, workspace_id, client_bid, utcnow()),
             )
             created += 1
 
@@ -1320,6 +1359,7 @@ def complete_queue(qid: str, body: CompleteIn) -> dict:
             summary = _store_research_leads(
                 conn, row["workspace_id"], qid, lead["business_id"], profile,
                 template=body.draft if isinstance(body.draft, dict) else None,
+                guard=leadguard.check_lead,
             )
             profile["leads_found"] = summary["created"] + summary["updated"]
             profile["leads_list_id"] = summary["list_id"]
@@ -1569,16 +1609,38 @@ def _insert_contact(conn, business_id: str, cand: dict, verify_detail: str | Non
     return cid if cur.rowcount else None
 
 
+def _record_attempt(conn, lead_id: str, note: str) -> None:
+    """Stamp a crawl attempt so the worker can leave this lead alone for a while."""
+    try:
+        conn.execute("UPDATE research_leads SET discover_attempted_at = ?, discover_note = ?"
+                     " WHERE id = ?", (utcnow(), str(note)[:200], lead_id))
+        conn.commit()
+    except Exception:  # noqa: BLE001 - bookkeeping must never lose the crawl result
+        log.exception("could not record discover attempt",
+                      extra={"extra_fields": {"lead": lead_id}})
+
+
 def discover_for_lead(conn, lead: dict, fetch=None) -> dict:
     """Find + verify contacts for one lead. Returns a counted outcome."""
     domain = (lead["domain"] or "").strip()
     if not domain:
         return {"lead_id": lead["id"], "found": 0, "reason": "no_domain"}
+    if not lead["business_id"]:
+        # contacts.business_id is NOT NULL; without the business row there is
+        # nothing to attach an address to, and retrying will not change that.
+        _record_attempt(conn, lead["id"], "skipped: lead has no business row")
+        return {"lead_id": lead["id"], "found": 0, "reason": "no_business"}
+
     found = discover.discover(domain, _fetch=fetch)
     cands = found["candidates"]
+    pages = found["pages_checked"]
     if not cands:
+        # Say so on the row. A lead whose site prints no address is a normal,
+        # permanent answer - not work to repeat on the next tick.
+        _record_attempt(conn, lead["id"],
+                        f"no address printed on {pages} page(s)")
         return {"lead_id": lead["id"], "found": 0, "reason": "no_address_published",
-                "pages_checked": found["pages_checked"]}
+                "pages_checked": pages}
 
     created, verified = 0, 0
     has_existing = conn.execute("SELECT 1 FROM contacts WHERE business_id = ? LIMIT 1",
@@ -1603,6 +1665,7 @@ def discover_for_lead(conn, lead: dict, fetch=None) -> dict:
                          " verified_at = COALESCE(verified_at, ?) WHERE email = ?",
                          (status, detail, utcnow() if status == "verified" else None,
                           cand["email"]))
+    _record_attempt(conn, lead["id"], f"{created} contact(s) from {pages} page(s)")
     conn.commit()
     return {"lead_id": lead["id"], "name": lead["name"], "domain": domain,
             "found": created, "verified": verified, "reason": "ok"}
@@ -1640,16 +1703,28 @@ def discover_contacts_route(body: DiscoverIn) -> dict:
     return {"leads": len(results), "contacts_found": total, "results": results}
 
 
-def discover_pending(limit: int = 1) -> int:
+def discover_pending(limit: int = 1, retry_after_days: int = 14) -> int:
     """Worker hook: one lead's contacts discovered per tick. Slow on purpose —
-    this makes outbound HTTP to a stranger's website, so it runs on idle time."""
+    this makes outbound HTTP to a stranger's website, so it runs on idle time.
+
+    Ordering is "never tried first, then least recently tried", and a lead that
+    was tried recently is skipped. Without that, "newest first" plus "no contact
+    yet" pinned the queue to whatever lead happened to publish no address: it was
+    crawled every tick and no other lead ever got a turn. A site that prints no
+    address is a settled answer, not pending work; re-asking every minute is also
+    indistinguishable from scraping to the person paying for the bandwidth.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retry_after_days))
+    cutoff = cutoff.replace(microsecond=0).isoformat()
     conn = connect()
     try:
         sql = ("SELECT rl.id, rl.name, rl.domain, rl.business_id FROM research_leads rl "
-               "WHERE COALESCE(rl.domain, '') != '' AND NOT EXISTS "
-               "(SELECT 1 FROM contacts c WHERE c.business_id = rl.business_id) "
-               "ORDER BY rl.created_at DESC LIMIT ?")
-        todo = conn.execute(sql, (max(1, limit),)).fetchall()
+               "WHERE COALESCE(rl.domain, '') != '' "
+               "  AND (rl.discover_attempted_at IS NULL OR rl.discover_attempted_at < ?) "
+               "  AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.business_id = rl.business_id) "
+               "ORDER BY (rl.discover_attempted_at IS NOT NULL), "
+               "         rl.discover_attempted_at ASC, rl.created_at DESC LIMIT ?")
+        todo = conn.execute(sql, (cutoff, max(1, limit))).fetchall()
         n = 0
         for lead in todo:
             try:

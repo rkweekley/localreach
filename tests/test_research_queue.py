@@ -215,7 +215,12 @@ def _completed_with_leads(ws, profile=None):
     return r.json()["item"]
 
 
-def test_agent_leads_are_saved_for_the_client(ws):
+def test_agent_leads_are_saved_for_the_client(ws, monkeypatch):
+    # These fixtures are not real sites, so provenance cannot be re-derived here;
+    # leadguard itself is exercised in tests/test_leadguard.py.
+    monkeypatch.setattr("app.leadguard.check_lead",
+                        lambda lead, locality="": {"domain": lead.get("domain", ""),
+                                                   "note": "fixture: domain printed by test"})
     item = _completed_with_leads(ws)
     assert item["status"] == "done", item.get("error")
     profile = item["profile"]

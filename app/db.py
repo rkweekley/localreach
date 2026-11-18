@@ -105,6 +105,16 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     ("research_queue", "progress_stage", "TEXT"),
     ("research_queue", "progress_note", "TEXT"),
     ("research_queue", "progress_at", "TEXT"),
+    # Why a lead's domain was kept, dropped or rewritten. Without it a cleared
+    # domain looks like a bug, and the next person re-adds the guess the guard
+    # just removed.
+    ("research_leads", "evidence_note", "TEXT"),
+    # The crawler needs a memory of having tried. A lead whose site publishes no
+    # address still has a domain, so "no contact yet" is permanently true and the
+    # worker re-crawls the same site every tick forever - both wasteful and, from
+    # the website owner's side, indistinguishable from abuse.
+    ("research_leads", "discover_attempted_at", "TEXT"),
+    ("research_leads", "discover_note", "TEXT"),
 ]
 
 

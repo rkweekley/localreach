@@ -281,6 +281,9 @@ CREATE TABLE IF NOT EXISTS research_leads (
   signal_detail TEXT,
   signal_source TEXT,                  -- URL the signal was read on
   contact_hint  TEXT,                  -- named person/role found, never a guessed address
+  evidence_note TEXT,                  -- why a domain was kept, dropped or rewritten
+  discover_attempted_at TEXT,           -- when the crawler last tried this domain
+  discover_note TEXT,                  -- what that crawl found (or didn't)
   fit           INTEGER,               -- 0-100 match to the client's best customer
   created_at    TEXT NOT NULL
 );
