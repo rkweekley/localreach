@@ -338,10 +338,10 @@ def test_the_stored_draft_is_cleaned_at_the_write_point(monkeypatch):
 # ------------------------------------------------------- flat-rhythm repair
 
 FLAT_JOINED = (
-    "Legacy 740 opens at 220 Third Street in December, and the gym and the clinic "
-    "both open that week too. We keep small offices running when the wifi drops or "
-    "the cameras fail late at night. Does your team already have someone handling "
-    "the network for the new location?"
+    "Legacy 740 opens in December, and the gym and the clinic both open that same "
+    "week too. We keep small offices running when the wifi drops or the cameras fail "
+    "late at night. Does your team already have someone handling the network for the "
+    "new location?"
 )
 
 
@@ -478,3 +478,17 @@ def test_merge_template_copy_is_never_rewritten():
     )
     assert voice.fix_subject(subject) == subject
     assert voice.fix_body(body) == body.strip()
+
+
+def test_a_split_that_only_reaches_nine_words_is_not_taken():
+    """Nine words is not a beat. A half-fix that still reads flat just moves the
+    warning without answering it, so the draft keeps its note for the human."""
+    body = (
+        "Legacy 740 opens at 220 Third Street in December, and the gym and the clinic "
+        "both open that week too. We keep small offices running when the wifi drops or "
+        "the cameras fail late at night. Does your team already have someone handling "
+        "the network for the new location?"
+    )
+    assert voice.fix_body(body) == body.strip()
+    hard = [f["code"] for f in voice.lint("Third Street in December", body)["flags"] if f["hard"]]
+    assert "flat_rhythm" in hard

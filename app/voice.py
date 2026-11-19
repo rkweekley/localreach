@@ -135,6 +135,10 @@ _RHYTHM_SPLITS = (
     ", mostly ", ", especially ", ", usually ", ", often ", ", ",
 )
 
+# Longest sentence that still counts as a beat: the linter flags a draft with
+# nothing under this, and the repair only accepts a break that produces one.
+_BEAT_MAX = 8
+
 
 # ------------------------------------------------------------------ helpers
 
@@ -195,9 +199,12 @@ def fix_subject(subject: str) -> str:
 def _split_once(text: str, target_min: int) -> str:
     """Split the longest splittable sentence in two, without losing a word.
 
-    Only accepts a break that leaves a shorter sentence than the draft already
-    has, and only at a real clause join, so the result is two sentences rather
-    than a clause and a fragment. Returns the text unchanged when no break helps.
+    Only accepts a break at a real clause join that produces a genuinely short
+    sentence (eight words or fewer — what the linter calls a beat) while leaving
+    a shorter minimum than the draft already has. A break that lands at nine
+    words buys nothing: the draft still reads flat and gets flagged again, so
+    the copy is better left alone with its note. Returns the text unchanged when
+    no break helps.
     """
     best = None
     for m in re.finditer(r"[^.?!]+[.?!]", text):
@@ -216,7 +223,8 @@ def _split_once(text: str, target_min: int) -> str:
                 continue
             # The joining word stays and counts toward the new clause.
             join_words = 0 if marker.strip(" ,;") == "" else 1
-            if min(word_count(head), word_count(tail) + join_words) >= target_min:
+            short_side = min(word_count(head), word_count(tail) + join_words)
+            if short_side > _BEAT_MAX or short_side >= target_min:
                 continue
             if best is None or n > best[0]:
                 best = (n, m.start(), m.end(), head, tail, marker)
@@ -287,7 +295,7 @@ def fix_body(body: str) -> str:
     # word: chopping every long sentence reads worse, not more human.
     for _ in range(2):
         lens = [word_count(s) for s in sentences(text)]
-        if len(lens) < 3 or statistics.pstdev(lens) >= 4.0 or min(lens) < 9:
+        if len(lens) < 3 or statistics.pstdev(lens) >= 4.0 or min(lens) <= _BEAT_MAX:
             break
         wider = _split_once(text, min(lens))
         if wider == text:
@@ -384,7 +392,7 @@ def lint(subject: str, body: str) -> dict:
     # same length. Flag the absence of any beat (every sentence nine words or
     # longer), not a low variance on its own: three tidy 9/16/13 sentences are
     # ordinary human copy and flagging them trains the operator to ignore this.
-    if words and len(sents) >= 3 and statistics.pstdev(lens) < 4.0 and min(lens) >= 9:
+    if words and len(sents) >= 3 and statistics.pstdev(lens) < 4.0 and min(lens) > _BEAT_MAX:
         add(
             "flat_rhythm",
             f"sentence lengths {lens} have no short beat; one sentence under nine words "
