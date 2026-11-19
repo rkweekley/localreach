@@ -27,7 +27,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from . import ai, audit, discover, leadguard, research, verify
+from . import ai, audit, discover, leadguard, research, verify, voice
 from .db import connect, new_id, norm_company, rows, utcnow
 from .security import RateLimiter, client_ip
 
@@ -772,6 +772,15 @@ def _store_research_leads(
         if not subject and not body and isinstance(template, dict):
             subject = str(template.get("subject") or "").strip()[:180]
             body = str(template.get("body") or "").strip()[:4000]
+        # Voice pass on the stored copy, whichever path wrote it (agent draft or
+        # template). Templates and models both drift into the same shapes, so the
+        # cleanup belongs at the write point, not in the prompt alone.
+        if subject or body:
+            subject = voice.fix_subject(subject)[:180]
+            body = voice.fix_body(body)[:4000]
+            voice_note = voice.summarise(voice.lint(subject, body))
+        else:
+            voice_note = ""
 
         payload = (
             name, str(lead.get("why_now") or "")[:600],
@@ -815,6 +824,16 @@ def _store_research_leads(
                  lead_id, queue_id, workspace_id, client_bid, utcnow()),
             )
             created += 1
+
+        # Persist the cleaned copy and its voice report in one place, so both the
+        # insert and update paths above stay readable and the note can never drift
+        # from the body it describes.
+        if voice_note:
+            conn.execute(
+                "UPDATE research_leads SET email_subject = ?, email_body = ?, "
+                "voice_note = ? WHERE id = ?",
+                (subject or None, body or None, voice_note[:600], lead_id),
+            )
 
         # Ownership is a row, not a list name: "which client is this lead for"
         # has to survive renames, exports and a second client researching the

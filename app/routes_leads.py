@@ -41,6 +41,9 @@ SELECT cl.id, cl.client_business_id, cb.name AS client_name, cb.domain AS client
        cl.research_lead_id, cl.assigned_by, cl.created_at,
        rl.why_now, rl.signal_kind, rl.signal_detail, rl.signal_source, rl.contact_hint,
        rl.audit_score, rl.email_subject AS first_touch_subject, rl.email_body AS first_touch_body,
+       -- What still read machine-written after the cleanup pass. The operator
+       -- decides whether to send, so the verdict travels with the draft.
+       rl.voice_note,
        ct.email, ct.email_status, ct.full_name AS contact_name,
        CASE WHEN COALESCE(rl.email_subject, '') <> '' OR COALESCE(rl.email_body, '') <> ''
             THEN 1 ELSE 0 END AS has_first_touch

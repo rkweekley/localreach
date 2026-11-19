@@ -115,6 +115,10 @@ _MIGRATIONS: list[tuple[str, str, str]] = [
     # the website owner's side, indistinguishable from abuse.
     ("research_leads", "discover_attempted_at", "TEXT"),
     ("research_leads", "discover_note", "TEXT"),
+    # What still read as machine-written in the stored draft, recorded at the
+    # write point. Kept separate from evidence_note on purpose: provenance is
+    # about facts and a domain, voice is about how the copy lands.
+    ("research_leads", "voice_note", "TEXT"),
 ]
 
 

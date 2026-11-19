@@ -333,16 +333,79 @@ def draft_email(profile: dict | None, business: dict | None, contact: dict | Non
     subject = re.sub(r"\s+", " ", subject).strip() or "quick question"
     body = re.sub(r"[ \t]+([.,!?])", r"\1", body)
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
+
+    # Voice pass runs last, on whichever copy we ended up with. It only rewrites
+    # mechanically (em dashes, filler openers, inflated words); the lint result
+    # travels with the draft so a human sees what still reads as machine-written.
+    from . import voice as voice_check
+
+    subject = voice_check.fix_subject(subject)
+    body = voice_check.fix_body(body)
+    check = voice_check.lint(subject, body)
+
+    # One revision pass, and only when a model wrote the copy and the linter can
+    # name the defect. Handing a model its own measured sentence lengths is far
+    # stronger feedback than telling it in advance to vary them, and it costs one
+    # extra call. Never loops: a draft that fails twice ships with its note.
+    if used_llm and not check["ok"]:
+        retry = _revise_for_voice(body, check)
+        if retry:
+            cand = voice_check.fix_body(retry)
+            cand_check = voice_check.lint(subject, cand)
+            if _hard_count(cand_check) < _hard_count(check) or cand_check["ok"]:
+                body, check = cand, cand_check
     return {
         "subject": subject[:160],
         "body": body,
         "used_llm": used_llm,
         "word_count": len(body.split()),
         "grounded": bool(brief),
+        "voice_ok": check["ok"],
+        "voice_note": voice_check.summarise(check),
+        "voice_flags": [f["code"] for f in check["flags"]],
     }
 
 
 _STOP = {"the", "and", "for", "llc", "inc", "co", "company", "services", "service"}
+
+
+_VOICE_REVISE_PROMPT = """You wrote this first-touch email:
+
+{body}
+
+A voice check rejected it: {note}
+
+Rewrite it. Keep every fact and the same single question. Invent nothing and
+drop nothing. Break the rhythm: at least one sentence must run six words or
+fewer, and no two consecutive sentences may sit within three words of each
+other in length. Return the email body only. No subject line, no commentary."""
+
+
+def _hard_count(check: dict) -> int:
+    return sum(1 for f in check.get("flags", []) if f.get("hard"))
+
+
+def _revise_for_voice(body: str, check: dict) -> str:
+    """Ask once for a rewrite that fixes the named defect. Returns "" on failure."""
+    note = "; ".join(f["detail"] for f in check.get("flags", []) if f.get("hard"))[:300]
+    if not note:
+        return ""
+    raw = _llm(
+        _VOICE_REVISE_PROMPT.format(body=body.strip(), note=note),
+        max_tokens=600,
+        temperature=0.7,
+    )
+    if not raw or not raw.strip():
+        return ""
+    text = raw.strip()
+    if text.startswith("{"):
+        from .research import _parse_json_object  # local import: avoids a cycle
+
+        parsed = _parse_json_object(text)
+        if isinstance(parsed, dict) and isinstance(parsed.get("body"), str):
+            text = parsed["body"].strip()
+    text = re.sub(r"^```[a-z]*\s*|\s*```$", "", text).strip()
+    return text if len(text.split()) >= 25 else ""
 
 
 def _proper_nouns(business: dict, profile: dict | None) -> list[str]:

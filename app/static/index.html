@@ -920,11 +920,18 @@ async function leadModal(id) {
   if (!r) return;
   const fit = r.fit == null ? "—" : String(r.fit);
   const hasTouch = r.has_first_touch && (r.first_touch_subject || r.first_touch_body);
+  // The draft is cleaned at the write point, but "clean" is a verdict about
+  // shape, not a guarantee the email will land like a person wrote it. Show
+  // whatever still read machine-written so the operator can fix or skip it.
+  const voice = (r.voice_note && r.voice_note !== "clean")
+    ? '<div style="margin-top:8px"><span class="pill warn" title="tells a rewrite cannot safely repair">reads generated</span> ' +
+      '<span class="muted" style="font-size:12px">' + esc(r.voice_note) + "</span></div>"
+    : "";
   const touch = hasTouch
     ? '<div style="margin-top:12px"><div class="k muted" style="font-size:12px;margin-bottom:6px">First touch · sent as ' +
         esc(r.client_name || "unassigned") + "</div>" +
       '<div style="margin-bottom:6px"><strong>' + esc(r.first_touch_subject || "(no subject)") + "</strong></div>" +
-      '<pre style="white-space:pre-wrap;font-size:12.5px">' + esc(r.first_touch_body || "") + "</pre></div>"
+      '<pre style="white-space:pre-wrap;font-size:12.5px">' + esc(r.first_touch_body || "") + "</pre>" + voice + "</div>"
     : '<div style="margin-top:12px" class="muted">No first touch drafted yet for this lead.</div>';
   // Copy fetches the finished email from the server, not from this row: only the
   // server knows the client's postal address and can mint the unsubscribe token,

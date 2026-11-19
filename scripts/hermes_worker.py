@@ -91,10 +91,26 @@ Rules for the email on each lead — this is the part that gets sent:
 - Write `email` as if you work at the researched business, selling what it sells, to THAT lead. Not us to them: them to the lead.
 - Open with the signal you actually read, in the first sentence: the role they are hiring for, the permit, the expansion, the review. Quote one concrete detail so they know a person read it.
 - Then one sentence connecting that signal to what the researched business does. Then one low-friction question that a busy owner could answer in a line.
-- 50-90 words. Plain language. No em dashes, no "I hope this finds you well", no flattery, no "revolutionary", no exclamation marks.
+- 50-90 words, 3-5 sentences, two short paragraphs at most. Plain language.
 - Never invent a fact, a number, a project name, or a person. If you did not read it, do not write it. Never claim you worked with them before.
 - Sign as the researched business's own name, not as Ryan, because this is their email going out under their name.
-- Subject: 6 words max, about their signal, no colon, no clickbait, no "Quick question".
+
+SOUND LIKE A PERSON, NOT A MODEL. This is the difference between a reply and a delete:
+- Vary sentence length on purpose. Put a six-word sentence next to a twenty-five-word one. An email where every sentence runs 15-20 words is the loudest sign a machine wrote it.
+- Write the way people talk: contractions (we're, it's, you're), plain verbs, one idea per sentence.
+- One question in the entire email. Two asks is no ask.
+- Do not restate the email at the end. Finish on the question, then sign.
+- Never use a three-item list ("fast, reliable, and secure"). Say the one thing that matters, or two.
+- Do not compliment them: no "impressive", "exciting", "great work", "congrats". Flattery is the second-loudest tell.
+- Vary how each lead's email opens. If four of these start "Saw that ...", they read as mail-merge. Mix it: the signal itself, the consequence of it, or the question first.
+- Banned outright: em dashes, exclamation marks, "I hope this finds you well", "I wanted to reach out", "just checking in", "quick question", "let me know your thoughts", "touch base", "streamline", "leverage", "robust", "seamless", "elevate", "unlock", "empower", "cutting-edge", "comprehensive", "delve", "navigate the landscape", "in today's fast-paced", "not just X, but Y".
+- A machine check runs on every draft after you write it: em dashes, filler openers, tell-words, three-item lists, more than one question, flat sentence rhythm and near-duplicate openings across the batch all get flagged for a human. Write it clean the first time.
+- Subject: 3-6 words, lowercase fine, about their signal, no colon, no clickbait, no "Quick question", no slogan. Keep company and place names capitalized.
+
+Example of the same email written badly and well. Bad: "Hi there, I hope this finds you well. Saw that Legacy740 opens at 220 Third Street the first week of December, with a 24-hour gym and a nurse practitioner-led clinic sharing one building. If the network is going in as part of the buildout, we can test the circuits before the doors open. We are a Marietta IT firm that keeps small offices running — fast, reliable, and secure. Who is handling the network and computers for the new space?"
+Good: "Hi there, A 24-hour gym and a clinic in the same building on Third Street. Two sets of computers, two sets of records, one address, and nobody on site at 2am if the wifi drops. We do IT for small offices around Marietta, mostly the part where the wifi, the cameras and the card reader all have to keep working on a Saturday. Who's handling that for the new space?"
+
+Rules for `draft`, the client's reusable template: 50-90 words, first person plural as the client, one sentence on what the client does, one low-friction question, {{business_name}} and {{city}} as placeholders. Same bans as above: no em dashes, no filler openers, no flattery, no three-item lists, no facts you did not read. Sign as the researched business.
 
 Return ONLY this JSON object, no prose, no code fence:
 {{"profile": {{"business_name": "", "what_they_do": "", "industry": "", "customers": "", "service_area": "", "talking_point": "", "services": [], "differentiators": [], "emails": [], "phones": [], "icp": "", "buying_signals": [], "url": "https://{domain}", "domain": "{domain}"}}, "leads": [{{"name": "", "domain": "", "why_now": "", "signal_kind": "hiring|permit|expansion|review|rfp|license|news|social|other", "signal_detail": "", "signal_source": "https://...", "contact_hint": "", "fit": 80, "email": {{"subject": "", "body": ""}}}}], "draft": {{"subject": "", "body": "", "grounded_on": ""}}}}"""

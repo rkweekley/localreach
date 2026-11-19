@@ -284,6 +284,7 @@ CREATE TABLE IF NOT EXISTS research_leads (
   evidence_note TEXT,                  -- why a domain was kept, dropped or rewritten
   discover_attempted_at TEXT,           -- when the crawler last tried this domain
   discover_note TEXT,                  -- what that crawl found (or didn't)
+  voice_note    TEXT,                  -- what still read as machine-written in the draft
   fit           INTEGER,               -- 0-100 match to the client's best customer
   created_at    TEXT NOT NULL
 );
